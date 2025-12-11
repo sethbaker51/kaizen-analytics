@@ -1,5 +1,6 @@
 import Header from "@/components/Header";
 import ConnectionTestCard from "@/components/ConnectionTestCard";
+import SalesWidget from "@/components/SalesWidget";
 
 export default function Dashboard() {
   return (
@@ -13,7 +14,9 @@ export default function Dashboard() {
               Connect to Amazon SP-API and monitor your seller analytics
             </p>
           </div>
-          
+
+          <SalesWidget />
+
           <ConnectionTestCard />
         </div>
       </main>
