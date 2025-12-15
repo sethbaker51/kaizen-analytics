@@ -3,7 +3,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { DollarSign, Package, ShoppingCart, RefreshCw, Loader2, TrendingUp } from "lucide-react";
 
-type DateRange = "today" | "7days" | "30days" | "60days" | "ytd" | "lastyear";
+type DateRange = "today" | "7days" | "30days" | "60days" | "ytd" | "lastyear" | "2years";
 
 interface SalesData {
   totalSales: number;
@@ -30,6 +30,7 @@ const DATE_RANGES: { value: DateRange; label: string }[] = [
   { value: "60days", label: "Past 60 Days" },
   { value: "ytd", label: "Year to Date" },
   { value: "lastyear", label: "Last Year" },
+  { value: "2years", label: "Last 2 Years" },
 ];
 
 function formatCurrency(amount: number, currency: string = "USD"): string {

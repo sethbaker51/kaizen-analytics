@@ -118,8 +118,10 @@ async function testSPAPIConnection(accessToken: string): Promise<any> {
 }
 
 function getDateRange(range: string): { startDate: string; endDate: string } {
+  // Use Pacific Time to match Amazon Seller Central's timezone
   const now = new Date();
-  const endDate = now.toISOString().split("T")[0];
+  const pacificTime = new Date(now.toLocaleString("en-US", { timeZone: "America/Los_Angeles" }));
+  const endDate = pacificTime.toISOString().split("T")[0];
   let startDate: string;
 
   switch (range) {
@@ -127,27 +129,32 @@ function getDateRange(range: string): { startDate: string; endDate: string } {
       startDate = endDate;
       break;
     case "7days":
-      const sevenDaysAgo = new Date(now);
-      sevenDaysAgo.setDate(now.getDate() - 7);
+      const sevenDaysAgo = new Date(pacificTime);
+      sevenDaysAgo.setDate(pacificTime.getDate() - 7);
       startDate = sevenDaysAgo.toISOString().split("T")[0];
       break;
     case "30days":
-      const thirtyDaysAgo = new Date(now);
-      thirtyDaysAgo.setDate(now.getDate() - 30);
+      const thirtyDaysAgo = new Date(pacificTime);
+      thirtyDaysAgo.setDate(pacificTime.getDate() - 30);
       startDate = thirtyDaysAgo.toISOString().split("T")[0];
       break;
     case "60days":
-      const sixtyDaysAgo = new Date(now);
-      sixtyDaysAgo.setDate(now.getDate() - 60);
+      const sixtyDaysAgo = new Date(pacificTime);
+      sixtyDaysAgo.setDate(pacificTime.getDate() - 60);
       startDate = sixtyDaysAgo.toISOString().split("T")[0];
       break;
     case "ytd":
-      startDate = `${now.getFullYear()}-01-01`;
+      startDate = `${pacificTime.getFullYear()}-01-01`;
       break;
     case "lastyear":
-      const lastYear = now.getFullYear() - 1;
+      const lastYear = pacificTime.getFullYear() - 1;
       startDate = `${lastYear}-01-01`;
       return { startDate, endDate: `${lastYear}-12-31` };
+    case "2years":
+      const twoYearsAgo = new Date(pacificTime);
+      twoYearsAgo.setFullYear(pacificTime.getFullYear() - 2);
+      startDate = twoYearsAgo.toISOString().split("T")[0];
+      break;
     default:
       startDate = endDate;
   }
@@ -161,9 +168,21 @@ async function getSalesData(
   endDate: string,
   marketplaceIds: string[] = ["ATVPDKIKX0DER"] // US marketplace
 ): Promise<any> {
+  // Determine if Pacific Time is currently in PST (-08:00) or PDT (-07:00)
+  const now = new Date();
+  const jan = new Date(now.getFullYear(), 0, 1);
+  const jul = new Date(now.getFullYear(), 6, 1);
+  const stdOffset = Math.max(jan.getTimezoneOffset(), jul.getTimezoneOffset());
+  const pacificDate = new Date(now.toLocaleString("en-US", { timeZone: "America/Los_Angeles" }));
+  const isDST = now.getTimezoneOffset() < stdOffset ||
+    pacificDate.toLocaleString("en-US", { timeZone: "America/Los_Angeles", timeZoneName: "short" }).includes("PDT");
+
+  // Use -07:00 for PDT (Mar-Nov) or -08:00 for PST (Nov-Mar)
+  const tzOffset = isDST ? "-07:00" : "-08:00";
+
   const params = new URLSearchParams({
     marketplaceIds: marketplaceIds.join(","),
-    interval: `${startDate}T00:00:00Z--${endDate}T23:59:59Z`,
+    interval: `${startDate}T00:00:00${tzOffset}--${endDate}T23:59:59${tzOffset}`,
     granularity: "Total",
   });
 
@@ -236,8 +255,8 @@ export async function registerRoutes(
           currency: metrics.totalSales?.currencyCode || "USD",
           unitCount: metrics.unitCount || 0,
           orderCount: metrics.orderCount || 0,
-          averageUnitPrice: metrics.averageUnitPrice?.amount || 0,
-          averageSellingPrice: metrics.averageSellingPrice?.amount || 0,
+          averageUnitPrice: metrics.averageSellingPrice?.amount || 0,
+          averageSellingPrice: metrics.averageUnitPrice?.amount || 0,
         },
         raw: salesData,
       });
