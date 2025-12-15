@@ -8,11 +8,13 @@ import { AppSidebar } from "@/components/AppSidebar";
 import NotFound from "@/pages/not-found";
 import Dashboard from "@/pages/Dashboard";
 import Settings from "@/pages/Settings";
+import SkuUpload from "@/pages/SkuUpload";
 
 function Router() {
   return (
     <Switch>
       <Route path="/" component={Dashboard} />
+      <Route path="/sku-upload" component={SkuUpload} />
       <Route path="/settings" component={Settings} />
       <Route component={NotFound} />
     </Switch>

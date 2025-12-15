@@ -19,7 +19,18 @@
       "Bash(git remote add:*)",
       "Bash(git remote set-url:*)",
       "Bash(git add:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(git fetch:*)",
+      "Bash(git checkout:*)",
+      "Bash(npm run dev)",
+      "Bash(ss:*)",
+      "Bash(netstat:*)",
+      "WebSearch",
+      "Bash(git merge:*)",
+      "Bash(grep:*)",
+      "WebFetch(domain:developer-docs.amazon.com)",
+      "WebFetch(domain:github.com)"
     ]
   }
 }
