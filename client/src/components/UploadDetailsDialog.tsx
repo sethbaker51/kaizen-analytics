@@ -189,7 +189,66 @@ export default function UploadDetailsDialog({ uploadId, onClose }: UploadDetails
                 </div>
               )}
               {(details.status === "completed" || details.status === "failed") && details.feedResult && (
-                <div className="col-span-2">
+                <div className="col-span-2 space-y-3">
+                  {/* Human-readable summary */}
+                  {(() => {
+                    try {
+                      const result = JSON.parse(details.feedResult);
+                      const summary = result.summary;
+                      const issues = result.issues || [];
+                      const isSuccess = summary?.messagesAccepted > 0 && summary?.errors === 0;
+                      const isDelete = details.filename.startsWith("delete-");
+
+                      return (
+                        <div className={`rounded-md p-4 ${isSuccess ? "bg-green-50 dark:bg-green-950/30" : "bg-red-50 dark:bg-red-950/30"}`}>
+                          <div className="flex items-start gap-3">
+                            {isSuccess ? (
+                              <CheckCircle2 className="h-5 w-5 text-green-600 dark:text-green-400 mt-0.5" />
+                            ) : (
+                              <XCircle className="h-5 w-5 text-red-600 dark:text-red-400 mt-0.5" />
+                            )}
+                            <div className="flex-1">
+                              <p className={`font-medium ${isSuccess ? "text-green-800 dark:text-green-200" : "text-red-800 dark:text-red-200"}`}>
+                                {isSuccess
+                                  ? (isDelete ? "SKU Successfully Deleted" : "SKU Successfully Created")
+                                  : "Processing Failed"
+                                }
+                              </p>
+                              <div className={`text-sm mt-2 space-y-1 ${isSuccess ? "text-green-700 dark:text-green-300" : "text-red-700 dark:text-red-300"}`}>
+                                <p>Processed: {summary?.messagesProcessed || 0}</p>
+                                <p>Accepted: {summary?.messagesAccepted || 0}</p>
+                                {summary?.messagesInvalid > 0 && (
+                                  <p>Invalid: {summary.messagesInvalid}</p>
+                                )}
+                                {summary?.errors > 0 && (
+                                  <p>Errors: {summary.errors}</p>
+                                )}
+                              </div>
+                              {issues.length > 0 && (
+                                <div className="mt-3 text-sm">
+                                  <p className="font-medium text-red-800 dark:text-red-200">Issues:</p>
+                                  <ul className="list-disc list-inside mt-1 space-y-1">
+                                    {issues.slice(0, 5).map((issue: any, i: number) => (
+                                      <li key={i} className="text-red-700 dark:text-red-300">
+                                        {issue.sku && <span className="font-mono">[{issue.sku}]</span>} {issue.message}
+                                      </li>
+                                    ))}
+                                    {issues.length > 5 && (
+                                      <li className="text-red-700 dark:text-red-300">
+                                        ...and {issues.length - 5} more issues
+                                      </li>
+                                    )}
+                                  </ul>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    } catch {
+                      return null;
+                    }
+                  })()}
                   <Button
                     variant="outline"
                     size="sm"
@@ -198,7 +257,7 @@ export default function UploadDetailsDialog({ uploadId, onClose }: UploadDetails
                     }}
                   >
                     <Download className="h-4 w-4 mr-2" />
-                    Download Processing Report
+                    Download Full Report (JSON)
                   </Button>
                 </div>
               )}

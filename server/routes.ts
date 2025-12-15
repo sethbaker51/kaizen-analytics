@@ -985,5 +985,223 @@ MY-SKU-002,B07XJ8C8F5,29.99,50,new,true,true,Not Applicable`;
     }
   });
 
+  // SKU Delete: Delete single SKU (close first, then delete)
+  app.post("/api/sku/delete", async (req, res) => {
+    try {
+      const { sku } = req.body;
+
+      if (!sku || typeof sku !== "string") {
+        return res.status(400).json({
+          success: false,
+          error: "SKU is required",
+        });
+      }
+
+      log(`Closing and deleting single SKU: ${sku}`, "sku-delete");
+
+      // Create upload record for tracking
+      const upload = await storage.createSkuUpload({
+        filename: `delete-${sku}`,
+        status: "submitting",
+        totalItems: 1,
+      });
+
+      const accessToken = await getLWAAccessToken();
+      const sellerId = process.env.SP_API_SELLER_ID || "A1QO8EE1RAHPLZ";
+
+      // Step 1: Close the listing (set quantity to 0)
+      const closeFeedDoc = await createFeedDocument(accessToken);
+      const closeFeed = {
+        header: {
+          sellerId,
+          version: "2.0",
+          issueLocale: "en_US",
+        },
+        messages: [{
+          messageId: 1,
+          sku: sku,
+          operationType: "PATCH",
+          productType: "PRODUCT",
+          patches: [{
+            op: "replace",
+            path: "/attributes/fulfillment_availability",
+            value: [{
+              fulfillment_channel_code: "AMAZON_NA",
+              quantity: 0,
+            }],
+          }],
+        }],
+      };
+
+      await uploadFeedContent(closeFeedDoc.url, JSON.stringify(closeFeed));
+      const closeResult = await createFeed(accessToken, closeFeedDoc.feedDocumentId);
+      log(`Close feed submitted: ${closeResult.feedId}`, "sku-delete");
+
+      // Step 2: Delete the listing
+      const deleteFeedDoc = await createFeedDocument(accessToken);
+      const deleteFeed = {
+        header: {
+          sellerId,
+          version: "2.0",
+          issueLocale: "en_US",
+        },
+        messages: [{
+          messageId: 1,
+          sku: sku,
+          operationType: "DELETE",
+        }],
+      };
+
+      await uploadFeedContent(deleteFeedDoc.url, JSON.stringify(deleteFeed));
+      const deleteResult = await createFeed(accessToken, deleteFeedDoc.feedDocumentId);
+      log(`Delete feed submitted: ${deleteResult.feedId}`, "sku-delete");
+
+      // Track both feeds - store close feed ID in errorMessage field temporarily for reference
+      await storage.updateSkuUpload(upload.id, {
+        feedDocumentId: deleteFeedDoc.feedDocumentId,
+        feedId: deleteResult.feedId,
+        status: "processing",
+        errorMessage: `Close Feed: ${closeResult.feedId}`, // Store close feed ID for reference
+      });
+
+      res.json({
+        success: true,
+        message: `Close and delete requests submitted for SKU: ${sku}`,
+        data: {
+          uploadId: upload.id,
+          closeFeedId: closeResult.feedId,
+          deleteFeedId: deleteResult.feedId,
+          sku,
+        },
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      log(`SKU delete failed: ${errorMessage}`, "sku-delete");
+      res.status(500).json({
+        success: false,
+        error: errorMessage,
+      });
+    }
+  });
+
+  // SKU Delete: Bulk delete via CSV (close first, then delete)
+  app.post("/api/sku/delete-bulk", async (req, res) => {
+    try {
+      const { csvContent, filename } = req.body;
+
+      if (!csvContent || typeof csvContent !== "string") {
+        return res.status(400).json({
+          success: false,
+          error: "CSV content is required",
+        });
+      }
+
+      // Parse CSV - only need SKU column
+      const { headers, rows } = parseDelimitedFile(csvContent);
+
+      if (!headers.includes("sku")) {
+        return res.status(400).json({
+          success: false,
+          error: "CSV must have a 'sku' column",
+        });
+      }
+
+      const skus = rows
+        .map((row) => row.sku?.trim())
+        .filter((sku) => sku && sku.length > 0);
+
+      if (skus.length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: "No valid SKUs found in CSV",
+        });
+      }
+
+      log(`Bulk closing and deleting ${skus.length} SKUs`, "sku-delete");
+
+      // Create upload record for tracking
+      const upload = await storage.createSkuUpload({
+        filename: filename || `delete-${Date.now()}.csv`,
+        status: "submitting",
+        totalItems: skus.length,
+      });
+
+      const accessToken = await getLWAAccessToken();
+      const sellerId = process.env.SP_API_SELLER_ID || "A1QO8EE1RAHPLZ";
+
+      // Step 1: Close all listings (set quantity to 0)
+      const closeFeedDoc = await createFeedDocument(accessToken);
+      const closeFeed = {
+        header: {
+          sellerId,
+          version: "2.0",
+          issueLocale: "en_US",
+        },
+        messages: skus.map((sku, index) => ({
+          messageId: index + 1,
+          sku: sku,
+          operationType: "PATCH",
+          productType: "PRODUCT",
+          patches: [{
+            op: "replace",
+            path: "/attributes/fulfillment_availability",
+            value: [{
+              fulfillment_channel_code: "AMAZON_NA",
+              quantity: 0,
+            }],
+          }],
+        })),
+      };
+
+      await uploadFeedContent(closeFeedDoc.url, JSON.stringify(closeFeed));
+      const closeResult = await createFeed(accessToken, closeFeedDoc.feedDocumentId);
+      log(`Bulk close feed submitted: ${closeResult.feedId}`, "sku-delete");
+
+      // Step 2: Delete all listings
+      const deleteFeedDoc = await createFeedDocument(accessToken);
+      const deleteFeed = {
+        header: {
+          sellerId,
+          version: "2.0",
+          issueLocale: "en_US",
+        },
+        messages: skus.map((sku, index) => ({
+          messageId: index + 1,
+          sku: sku,
+          operationType: "DELETE",
+        })),
+      };
+
+      await uploadFeedContent(deleteFeedDoc.url, JSON.stringify(deleteFeed));
+      const deleteResult = await createFeed(accessToken, deleteFeedDoc.feedDocumentId);
+      log(`Bulk delete feed submitted: ${deleteResult.feedId}`, "sku-delete");
+
+      await storage.updateSkuUpload(upload.id, {
+        feedDocumentId: deleteFeedDoc.feedDocumentId,
+        feedId: deleteResult.feedId,
+        status: "processing",
+      });
+
+      res.json({
+        success: true,
+        message: `Close and delete requests submitted for ${skus.length} SKUs`,
+        data: {
+          uploadId: upload.id,
+          closeFeedId: closeResult.feedId,
+          deleteFeedId: deleteResult.feedId,
+          totalItems: skus.length,
+          status: "processing",
+        },
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      log(`Bulk SKU delete failed: ${errorMessage}`, "sku-delete");
+      res.status(500).json({
+        success: false,
+        error: errorMessage,
+      });
+    }
+  });
+
   return httpServer;
 }

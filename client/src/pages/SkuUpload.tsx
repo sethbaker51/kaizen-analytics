@@ -1,6 +1,7 @@
 import { useState } from "react";
 import CsvTemplateCard from "@/components/CsvTemplateCard";
 import SkuUploadCard from "@/components/SkuUploadCard";
+import SkuDeleteCard from "@/components/SkuDeleteCard";
 import UploadHistoryCard from "@/components/UploadHistoryCard";
 
 export default function SkuUpload() {
@@ -14,14 +15,18 @@ export default function SkuUpload() {
   return (
     <div className="space-y-8">
       <div>
-        <h1 className="text-2xl font-semibold">SKU Upload</h1>
+        <h1 className="text-2xl font-semibold">SKU Management</h1>
         <p className="text-muted-foreground mt-1">
-          Upload CSV files to create SKU listings linked to existing Amazon ASINs
+          Create and delete SKU listings linked to existing Amazon ASINs
         </p>
       </div>
 
+      <div className="grid gap-8 lg:grid-cols-2">
+        <SkuUploadCard onUploadComplete={handleUploadComplete} />
+        <SkuDeleteCard onDeleteComplete={handleUploadComplete} />
+      </div>
+
       <CsvTemplateCard />
-      <SkuUploadCard onUploadComplete={handleUploadComplete} />
       <UploadHistoryCard refreshTrigger={refreshTrigger} />
     </div>
   );
