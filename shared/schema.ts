@@ -81,7 +81,7 @@ const booleanString = z
 // CSV row validation schema
 export const csvSkuRowSchema = z.object({
   sku: z.string().min(1, "SKU is required"),
-  asin: z.string().min(1, "ASIN is required").regex(/^B[A-Z0-9]{9}$/, "Invalid ASIN format"),
+  asin: z.string().min(1, "ASIN is required").regex(/^(B[A-Z0-9]{9}|[0-9]{9}[0-9X])$/, "Invalid ASIN format (must be 10 chars: B followed by 9 alphanumeric, or ISBN-10)"),
   price: z.string().optional(),
   quantity: z.coerce.number().int().min(0).optional(),
   condition: z.string().transform((val) => val.toLowerCase()).pipe(z.enum(["new", "used", "refurbished"])).optional().default("new"),
