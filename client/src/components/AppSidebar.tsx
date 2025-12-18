@@ -1,5 +1,5 @@
 import { Link, useLocation } from "wouter";
-import { BarChart3, Settings, Upload } from "lucide-react";
+import { BarChart3, Bell, Package, Settings, ShoppingCart, Truck, Upload } from "lucide-react";
 import {
   Sidebar,
   SidebarContent,
@@ -21,6 +21,26 @@ const navItems = [
     title: "SKU Upload",
     url: "/sku-upload",
     icon: Upload,
+  },
+  {
+    title: "Orders",
+    url: "/orders",
+    icon: ShoppingCart,
+  },
+  {
+    title: "Inventory",
+    url: "/inventory",
+    icon: Package,
+  },
+  {
+    title: "Supplier Tracking",
+    url: "/supplier-tracking",
+    icon: Truck,
+  },
+  {
+    title: "Seller Central Alerts",
+    url: "/seller-central-alerts",
+    icon: Bell,
   },
   {
     title: "Settings",

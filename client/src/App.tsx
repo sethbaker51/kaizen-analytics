@@ -9,12 +9,16 @@ import NotFound from "@/pages/not-found";
 import Dashboard from "@/pages/Dashboard";
 import Settings from "@/pages/Settings";
 import SkuUpload from "@/pages/SkuUpload";
+import Orders from "@/pages/Orders";
+import Inventory from "@/pages/Inventory";
 
 function Router() {
   return (
     <Switch>
       <Route path="/" component={Dashboard} />
       <Route path="/sku-upload" component={SkuUpload} />
+      <Route path="/orders" component={Orders} />
+      <Route path="/inventory" component={Inventory} />
       <Route path="/settings" component={Settings} />
       <Route component={NotFound} />
     </Switch>

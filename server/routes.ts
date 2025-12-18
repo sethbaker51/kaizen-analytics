@@ -1084,6 +1084,226 @@ MY-SKU-002,B07XJ8C8F5,29.99,50,new,true,true,Not Applicable`;
     }
   });
 
+  // Orders: Get orders by date range
+  app.get("/api/orders", async (req, res) => {
+    try {
+      const { startDate, endDate, status } = req.query;
+
+      // Default to last 7 days if no dates provided
+      // SP-API requires CreatedBefore to be at least 2 minutes in the past
+      const now = new Date();
+      const twoMinutesAgo = new Date(now.getTime() - 3 * 60 * 1000); // 3 minutes buffer to be safe
+      const defaultEnd = twoMinutesAgo.toISOString();
+      const defaultStart = new Date(twoMinutesAgo.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
+
+      const createdAfter = (startDate as string) || defaultStart;
+      // Ensure createdBefore is at least 2 minutes in the past
+      let createdBefore = (endDate as string) || defaultEnd;
+      if (new Date(createdBefore) > twoMinutesAgo) {
+        createdBefore = twoMinutesAgo.toISOString();
+      }
+
+      log(`Fetching orders from ${createdAfter} to ${createdBefore}`, "orders");
+
+      const accessToken = await getLWAAccessToken();
+
+      const params = new URLSearchParams({
+        MarketplaceIds: "ATVPDKIKX0DER", // US marketplace
+        CreatedAfter: createdAfter,
+        CreatedBefore: createdBefore,
+      });
+
+      // Add optional status filter
+      if (status && typeof status === "string" && status !== "all") {
+        params.set("OrderStatuses", status);
+      }
+
+      const endpoint = `/orders/v0/orders?${params.toString()}`;
+      const result = await callSPAPI(accessToken, endpoint);
+
+      const orders = result.payload?.Orders || [];
+      const hasMore = !!result.payload?.NextToken;
+
+      log(`Fetched ${orders.length} orders, hasMore: ${hasMore}`, "orders");
+
+      // Fetch order items for each order (with rate limiting)
+      const ordersWithItems = [];
+      for (const order of orders) {
+        try {
+          const itemsEndpoint = `/orders/v0/orders/${order.AmazonOrderId}/orderItems`;
+          const itemsResult = await callSPAPI(accessToken, itemsEndpoint);
+          const items = itemsResult.payload?.OrderItems || [];
+
+          // Calculate total from items if OrderTotal not available
+          const itemsTotal = items.reduce((sum: number, item: any) => {
+            return sum + (Number(item.ItemPrice?.Amount) || 0);
+          }, 0);
+
+          ordersWithItems.push({
+            ...order,
+            calculatedTotal: itemsTotal,
+            items: items.map((item: any) => ({
+              asin: item.ASIN,
+              sku: item.SellerSKU,
+              title: item.Title,
+              quantity: item.QuantityOrdered,
+              itemPrice: item.ItemPrice?.Amount,
+            })),
+          });
+
+          // Small delay to avoid rate limits
+          await new Promise(resolve => setTimeout(resolve, 100));
+        } catch (itemError) {
+          // If we can't get items, still include the order without items
+          log(`Failed to fetch items for order ${order.AmazonOrderId}: ${itemError}`, "orders");
+          ordersWithItems.push({ ...order, items: [] });
+        }
+      }
+
+      // Calculate summary stats
+      const totalOrders = ordersWithItems.length;
+      const pendingOrders = ordersWithItems.filter((o: any) => o.OrderStatus === "Pending").length;
+      const shippedOrders = ordersWithItems.filter((o: any) => o.OrderStatus === "Shipped").length;
+      const canceledOrders = ordersWithItems.filter((o: any) => o.OrderStatus === "Canceled").length;
+      const unshippedOrders = ordersWithItems.filter((o: any) => o.OrderStatus === "Unshipped").length;
+
+      // Calculate total revenue from orders (use calculated total as fallback)
+      const totalRevenue = ordersWithItems.reduce((sum: number, order: any) => {
+        const amount = Number(order.OrderTotal?.Amount ?? order.calculatedTotal ?? 0);
+        return sum + amount;
+      }, 0);
+
+      res.json({
+        success: true,
+        data: {
+          summary: {
+            totalOrders,
+            pendingOrders,
+            unshippedOrders,
+            shippedOrders,
+            canceledOrders,
+            totalRevenue,
+            currency: ordersWithItems[0]?.OrderTotal?.CurrencyCode || "USD",
+            hasMore,
+          },
+          orders: ordersWithItems.map((order: any) => ({
+            orderId: order.AmazonOrderId,
+            purchaseDate: order.PurchaseDate,
+            lastUpdateDate: order.LastUpdateDate,
+            orderStatus: order.OrderStatus,
+            fulfillmentChannel: order.FulfillmentChannel,
+            salesChannel: order.SalesChannel,
+            orderTotal: order.OrderTotal?.Amount ?? order.calculatedTotal ?? null,
+            currency: order.OrderTotal?.CurrencyCode || "USD",
+            numberOfItems: order.NumberOfItemsShipped + order.NumberOfItemsUnshipped,
+            itemsShipped: order.NumberOfItemsShipped,
+            itemsUnshipped: order.NumberOfItemsUnshipped,
+            paymentMethod: order.PaymentMethod,
+            isPrime: order.IsPrime,
+            isBusinessOrder: order.IsBusinessOrder,
+            shipCity: order.ShippingAddress?.City,
+            shipState: order.ShippingAddress?.StateOrRegion,
+            shipPostalCode: order.ShippingAddress?.PostalCode,
+            items: order.items || [],
+          })),
+        },
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      log(`Orders fetch failed: ${errorMessage}`, "orders");
+      res.status(500).json({
+        success: false,
+        error: errorMessage,
+      });
+    }
+  });
+
+  // Inventory: Get FBA inventory summaries (single page to avoid rate limits)
+  app.get("/api/inventory", async (req, res) => {
+    try {
+      log("Fetching inventory data from SP-API", "inventory");
+
+      const accessToken = await getLWAAccessToken();
+
+      const params = new URLSearchParams({
+        granularityType: "Marketplace",
+        granularityId: "ATVPDKIKX0DER", // US marketplace
+        marketplaceIds: "ATVPDKIKX0DER",
+        details: "true",
+      });
+
+      const endpoint = `/fba/inventory/v1/summaries?${params.toString()}`;
+      const result = await callSPAPI(accessToken, endpoint);
+
+      const inventory = result.payload?.inventorySummaries || [];
+      const hasMore = !!result.pagination?.nextToken;
+
+      log(`Fetched ${inventory.length} items, hasMore: ${hasMore}`, "inventory");
+
+      // Calculate summary stats for this page
+      const pageCount = inventory.length;
+      const activeOnPage = inventory.filter((item: any) => {
+        const qty = Number(item.inventoryDetails?.fulfillableQuantity) || 0;
+        return qty > 0;
+      }).length;
+      const inactiveOnPage = pageCount - activeOnPage;
+      const totalFulfillable = inventory.reduce((sum: number, item: any) => {
+        return sum + (Number(item.inventoryDetails?.fulfillableQuantity) || 0);
+      }, 0);
+      const totalInbound = inventory.reduce((sum: number, item: any) => {
+        const working = Number(item.inventoryDetails?.inboundWorkingQuantity) || 0;
+        const shipped = Number(item.inventoryDetails?.inboundShippedQuantity) || 0;
+        const receiving = Number(item.inventoryDetails?.inboundReceivingQuantity) || 0;
+        return sum + working + shipped + receiving;
+      }, 0);
+      const totalUnfulfillable = inventory.reduce((sum: number, item: any) => {
+        return sum + (Number(item.inventoryDetails?.unfulfillableQuantity) || 0);
+      }, 0);
+      const totalReserved = inventory.reduce((sum: number, item: any) => {
+        return sum + (Number(item.inventoryDetails?.reservedQuantity?.totalReservedQuantity) || 0);
+      }, 0);
+
+      res.json({
+        success: true,
+        data: {
+          summary: {
+            totalItems: pageCount,
+            activeItems: activeOnPage,
+            inactiveItems: inactiveOnPage,
+            totalFulfillable,
+            totalInbound,
+            totalUnfulfillable,
+            totalReserved,
+            hasMore, // indicates there are more SKUs beyond this page
+          },
+          inventory: inventory.map((item: any) => ({
+            asin: item.asin,
+            fnSku: item.fnSku,
+            sellerSku: item.sellerSku,
+            productName: item.productName,
+            condition: item.condition,
+            lastUpdatedTime: item.lastUpdatedTime,
+            totalQuantity: Number(item.totalQuantity) || 0,
+            fulfillableQuantity: Number(item.inventoryDetails?.fulfillableQuantity) || 0,
+            inboundWorking: Number(item.inventoryDetails?.inboundWorkingQuantity) || 0,
+            inboundShipped: Number(item.inventoryDetails?.inboundShippedQuantity) || 0,
+            inboundReceiving: Number(item.inventoryDetails?.inboundReceivingQuantity) || 0,
+            reservedQuantity: Number(item.inventoryDetails?.reservedQuantity?.totalReservedQuantity) || 0,
+            unfulfillableQuantity: Number(item.inventoryDetails?.unfulfillableQuantity) || 0,
+            researchingQuantity: Number(item.inventoryDetails?.researchingQuantity) || 0,
+          })),
+        },
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      log(`Inventory fetch failed: ${errorMessage}`, "inventory");
+      res.status(500).json({
+        success: false,
+        error: errorMessage,
+      });
+    }
+  });
+
   // SKU Delete: Bulk delete via CSV (close first, then delete)
   app.post("/api/sku/delete-bulk", async (req, res) => {
     try {
