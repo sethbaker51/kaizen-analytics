@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, integer, timestamp } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, integer, timestamp, boolean } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -90,3 +90,138 @@ export const csvSkuRowSchema = z.object({
   are_batteries_included: booleanString,
   supplier_declared_dg_hz_regulation: z.string().optional().default("Not Applicable"),
 });
+
+// ============================================================================
+// Supplier Tracking Tables
+// ============================================================================
+
+// Gmail Accounts - OAuth tokens for connected Gmail accounts
+export const gmailAccounts = pgTable("gmail_accounts", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  email: text("email").notNull().unique(),
+  accessToken: text("access_token").notNull(),
+  refreshToken: text("refresh_token").notNull(),
+  tokenExpiry: timestamp("token_expiry").notNull(),
+  lastSyncAt: timestamp("last_sync_at"),
+  syncEnabled: boolean("sync_enabled").default(true).notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertGmailAccountSchema = createInsertSchema(gmailAccounts).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertGmailAccount = z.infer<typeof insertGmailAccountSchema>;
+export type GmailAccount = typeof gmailAccounts.$inferSelect;
+
+// Supplier order status enum
+export const supplierOrderStatusEnum = z.enum([
+  "pending",
+  "confirmed",
+  "shipped",
+  "in_transit",
+  "delivered",
+  "cancelled",
+  "issue",
+]);
+export type SupplierOrderStatus = z.infer<typeof supplierOrderStatusEnum>;
+
+// Supplier Orders - main order tracking table
+export const supplierOrders = pgTable("supplier_orders", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  gmailAccountId: varchar("gmail_account_id").notNull(),
+  emailMessageId: text("email_message_id").notNull().unique(),
+  supplierName: text("supplier_name"),
+  supplierEmail: text("supplier_email"),
+  orderNumber: text("order_number"),
+  orderDate: timestamp("order_date"),
+  expectedDeliveryDate: timestamp("expected_delivery_date"),
+  actualDeliveryDate: timestamp("actual_delivery_date"),
+  status: text("status").notNull().default("pending"),
+  trackingNumber: text("tracking_number"),
+  carrier: text("carrier"),
+  totalCost: text("total_cost"),
+  currency: text("currency").default("USD"),
+  notes: text("notes"),
+  emailSubject: text("email_subject"),
+  emailSnippet: text("email_snippet"),
+  rawEmailData: text("raw_email_data"),
+  isFlagged: boolean("is_flagged").default(false).notNull(),
+  flagReason: text("flag_reason"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertSupplierOrderSchema = createInsertSchema(supplierOrders).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertSupplierOrder = z.infer<typeof insertSupplierOrderSchema>;
+export type SupplierOrder = typeof supplierOrders.$inferSelect;
+
+// Supplier Order Items - line items within each order
+export const supplierOrderItems = pgTable("supplier_order_items", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  orderId: varchar("order_id").notNull(),
+  sku: text("sku"),
+  asin: text("asin"),
+  productName: text("product_name"),
+  quantity: integer("quantity"),
+  unitCost: text("unit_cost"),
+  totalCost: text("total_cost"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertSupplierOrderItemSchema = createInsertSchema(supplierOrderItems).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertSupplierOrderItem = z.infer<typeof insertSupplierOrderItemSchema>;
+export type SupplierOrderItem = typeof supplierOrderItems.$inferSelect;
+
+// Email Sync Logs - tracks sync operations for debugging
+export const emailSyncLogs = pgTable("email_sync_logs", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  gmailAccountId: varchar("gmail_account_id"),
+  syncType: text("sync_type").notNull(), // manual, scheduled
+  status: text("status").notNull(), // running, completed, failed
+  emailsProcessed: integer("emails_processed").default(0).notNull(),
+  ordersCreated: integer("orders_created").default(0).notNull(),
+  ordersUpdated: integer("orders_updated").default(0).notNull(),
+  errorMessage: text("error_message"),
+  startedAt: timestamp("started_at").defaultNow().notNull(),
+  completedAt: timestamp("completed_at"),
+});
+
+export const insertEmailSyncLogSchema = createInsertSchema(emailSyncLogs).omit({
+  id: true,
+  startedAt: true,
+});
+
+export type InsertEmailSyncLog = z.infer<typeof insertEmailSyncLogSchema>;
+export type EmailSyncLog = typeof emailSyncLogs.$inferSelect;
+
+// Supplier Tracking Settings - configurable thresholds for auto-flagging
+export const supplierTrackingSettings = pgTable("supplier_tracking_settings", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  inTransitThresholdDays: integer("in_transit_threshold_days").default(7).notNull(),
+  noTrackingThresholdDays: integer("no_tracking_threshold_days").default(3).notNull(),
+  autoFlagOverdue: boolean("auto_flag_overdue").default(true).notNull(),
+  autoFlagCancelled: boolean("auto_flag_cancelled").default(true).notNull(),
+  autoFlagNoTracking: boolean("auto_flag_no_tracking").default(true).notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertSupplierTrackingSettingsSchema = createInsertSchema(supplierTrackingSettings).omit({
+  id: true,
+  updatedAt: true,
+});
+
+export type InsertSupplierTrackingSettings = z.infer<typeof insertSupplierTrackingSettingsSchema>;
+export type SupplierTrackingSettings = typeof supplierTrackingSettings.$inferSelect;

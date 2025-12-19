@@ -1,8 +1,10 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
-import { storage } from "./storage";
+import { storage, type SupplierOrderFilters } from "./storage";
 import { log } from "./log";
 import { csvSkuRowSchema, type InsertSkuItem } from "@shared/schema";
+import * as gmail from "./gmail";
+import * as emailSync from "./emailSync";
 
 // SP-API configuration
 const LWA_TOKEN_ENDPOINT = "https://api.amazon.com/auth/o2/token";
@@ -1416,6 +1418,485 @@ MY-SKU-002,B07XJ8C8F5,29.99,50,new,true,true,Not Applicable`;
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       log(`Bulk SKU delete failed: ${errorMessage}`, "sku-delete");
+      res.status(500).json({
+        success: false,
+        error: errorMessage,
+      });
+    }
+  });
+
+  // ============================================================================
+  // Gmail OAuth Endpoints
+  // ============================================================================
+
+  // Gmail: Check if Gmail is configured
+  app.get("/api/gmail/status", (req, res) => {
+    res.json({
+      success: true,
+      configured: gmail.isGmailConfigured(),
+    });
+  });
+
+  // Gmail: Initiate OAuth flow
+  app.get("/api/gmail/auth", (req, res) => {
+    try {
+      if (!gmail.isGmailConfigured()) {
+        return res.status(400).json({
+          success: false,
+          error: "Gmail API credentials not configured. Please set GMAIL_CLIENT_ID and GMAIL_CLIENT_SECRET environment variables.",
+        });
+      }
+
+      const state = Math.random().toString(36).substring(7);
+      const authUrl = gmail.getAuthUrl(state);
+
+      log(`Redirecting to Gmail OAuth: ${authUrl}`, "gmail");
+      res.redirect(authUrl);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      log(`Gmail auth initiation failed: ${errorMessage}`, "gmail");
+      res.status(500).json({
+        success: false,
+        error: errorMessage,
+      });
+    }
+  });
+
+  // Gmail: OAuth callback
+  app.get("/api/gmail/callback", async (req, res) => {
+    try {
+      const { code, error: oauthError } = req.query;
+
+      if (oauthError) {
+        log(`Gmail OAuth error: ${oauthError}`, "gmail");
+        return res.redirect("/settings?error=gmail_auth_denied");
+      }
+
+      if (!code || typeof code !== "string") {
+        return res.redirect("/settings?error=gmail_no_code");
+      }
+
+      // Exchange code for tokens
+      const tokens = await gmail.exchangeCodeForTokens(code);
+
+      // Get user email
+      const email = await gmail.getUserEmail(tokens.accessToken);
+
+      // Check if account already exists
+      const existingAccount = await storage.getGmailAccountByEmail(email);
+      if (existingAccount) {
+        // Update tokens
+        await storage.updateGmailAccount(existingAccount.id, {
+          accessToken: tokens.accessToken,
+          refreshToken: tokens.refreshToken,
+          tokenExpiry: tokens.tokenExpiry,
+        });
+        log(`Updated Gmail account: ${email}`, "gmail");
+      } else {
+        // Create new account
+        await storage.createGmailAccount({
+          email,
+          accessToken: tokens.accessToken,
+          refreshToken: tokens.refreshToken,
+          tokenExpiry: tokens.tokenExpiry,
+          syncEnabled: true,
+        });
+        log(`Created Gmail account: ${email}`, "gmail");
+      }
+
+      res.redirect("/settings?success=gmail_connected");
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      log(`Gmail OAuth callback failed: ${errorMessage}`, "gmail");
+      res.redirect(`/settings?error=gmail_auth_failed`);
+    }
+  });
+
+  // Gmail: List connected accounts
+  app.get("/api/gmail/accounts", async (req, res) => {
+    try {
+      const accounts = await storage.getAllGmailAccounts();
+
+      // Return accounts without sensitive token data
+      res.json({
+        success: true,
+        data: accounts.map((account) => ({
+          id: account.id,
+          email: account.email,
+          syncEnabled: account.syncEnabled,
+          lastSyncAt: account.lastSyncAt,
+          createdAt: account.createdAt,
+          tokenExpiry: account.tokenExpiry,
+          isTokenExpired: new Date() > account.tokenExpiry,
+        })),
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      res.status(500).json({
+        success: false,
+        error: errorMessage,
+      });
+    }
+  });
+
+  // Gmail: Update account (toggle sync)
+  app.patch("/api/gmail/accounts/:id", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { syncEnabled } = req.body;
+
+      const account = await storage.getGmailAccount(id);
+      if (!account) {
+        return res.status(404).json({
+          success: false,
+          error: "Account not found",
+        });
+      }
+
+      const updated = await storage.updateGmailAccount(id, { syncEnabled });
+
+      res.json({
+        success: true,
+        data: {
+          id: updated!.id,
+          email: updated!.email,
+          syncEnabled: updated!.syncEnabled,
+        },
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      res.status(500).json({
+        success: false,
+        error: errorMessage,
+      });
+    }
+  });
+
+  // Gmail: Disconnect account
+  app.delete("/api/gmail/accounts/:id", async (req, res) => {
+    try {
+      const { id } = req.params;
+
+      const account = await storage.getGmailAccount(id);
+      if (!account) {
+        return res.status(404).json({
+          success: false,
+          error: "Account not found",
+        });
+      }
+
+      await storage.deleteGmailAccount(id);
+      log(`Disconnected Gmail account: ${account.email}`, "gmail");
+
+      res.json({
+        success: true,
+        message: `Disconnected ${account.email}`,
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      res.status(500).json({
+        success: false,
+        error: errorMessage,
+      });
+    }
+  });
+
+  // Gmail: Trigger sync for all accounts
+  app.post("/api/gmail/sync", async (req, res) => {
+    try {
+      log("Manual sync triggered for all accounts", "gmail");
+      const results = await emailSync.syncAllAccounts();
+
+      const totalEmails = results.reduce((sum, r) => sum + r.emailsProcessed, 0);
+      const totalOrders = results.reduce((sum, r) => sum + r.ordersCreated, 0);
+
+      res.json({
+        success: true,
+        message: `Synced ${results.length} accounts`,
+        data: {
+          accountsSynced: results.length,
+          totalEmailsProcessed: totalEmails,
+          totalOrdersCreated: totalOrders,
+          results,
+        },
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      log(`Sync all accounts failed: ${errorMessage}`, "gmail");
+      res.status(500).json({
+        success: false,
+        error: errorMessage,
+      });
+    }
+  });
+
+  // Gmail: Trigger sync for single account
+  app.post("/api/gmail/accounts/:id/sync", async (req, res) => {
+    try {
+      const { id } = req.params;
+
+      const account = await storage.getGmailAccount(id);
+      if (!account) {
+        return res.status(404).json({
+          success: false,
+          error: "Account not found",
+        });
+      }
+
+      log(`Manual sync triggered for ${account.email}`, "gmail");
+      const result = await emailSync.syncAccount(id);
+
+      res.json({
+        success: true,
+        data: result,
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      log(`Sync account failed: ${errorMessage}`, "gmail");
+      res.status(500).json({
+        success: false,
+        error: errorMessage,
+      });
+    }
+  });
+
+  // ============================================================================
+  // Supplier Orders Endpoints
+  // ============================================================================
+
+  // Supplier Orders: Get orders with filters
+  app.get("/api/supplier-orders", async (req, res) => {
+    try {
+      const { status, startDate, endDate, supplier, flagged, search, limit, offset } = req.query;
+
+      const filters: SupplierOrderFilters = {
+        status: status as string,
+        startDate: startDate ? new Date(startDate as string) : undefined,
+        endDate: endDate ? new Date(endDate as string) : undefined,
+        supplier: supplier as string,
+        isFlagged: flagged === "true" ? true : flagged === "false" ? false : undefined,
+        search: search as string,
+        limit: limit ? parseInt(limit as string) : 100,
+        offset: offset ? parseInt(offset as string) : 0,
+      };
+
+      const [orders, stats] = await Promise.all([
+        storage.getSupplierOrders(filters),
+        storage.getSupplierOrderStats(),
+      ]);
+
+      res.json({
+        success: true,
+        summary: stats,
+        data: orders,
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      log(`Supplier orders fetch failed: ${errorMessage}`, "supplier-orders");
+      res.status(500).json({
+        success: false,
+        error: errorMessage,
+      });
+    }
+  });
+
+  // Supplier Orders: Get stats
+  app.get("/api/supplier-orders/stats", async (req, res) => {
+    try {
+      const stats = await storage.getSupplierOrderStats();
+      res.json({
+        success: true,
+        data: stats,
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      res.status(500).json({
+        success: false,
+        error: errorMessage,
+      });
+    }
+  });
+
+  // Supplier Orders: Get single order with items
+  app.get("/api/supplier-orders/:id", async (req, res) => {
+    try {
+      const { id } = req.params;
+
+      const order = await storage.getSupplierOrder(id);
+      if (!order) {
+        return res.status(404).json({
+          success: false,
+          error: "Order not found",
+        });
+      }
+
+      const items = await storage.getSupplierOrderItems(id);
+
+      res.json({
+        success: true,
+        data: {
+          ...order,
+          items,
+        },
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      res.status(500).json({
+        success: false,
+        error: errorMessage,
+      });
+    }
+  });
+
+  // Supplier Orders: Update order
+  app.patch("/api/supplier-orders/:id", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { status, expectedDeliveryDate, actualDeliveryDate, notes, trackingNumber, carrier } = req.body;
+
+      const order = await storage.getSupplierOrder(id);
+      if (!order) {
+        return res.status(404).json({
+          success: false,
+          error: "Order not found",
+        });
+      }
+
+      const updateData: Partial<typeof order> = {};
+      if (status !== undefined) updateData.status = status;
+      if (expectedDeliveryDate !== undefined) {
+        updateData.expectedDeliveryDate = expectedDeliveryDate ? new Date(expectedDeliveryDate) : null;
+      }
+      if (actualDeliveryDate !== undefined) {
+        updateData.actualDeliveryDate = actualDeliveryDate ? new Date(actualDeliveryDate) : null;
+      }
+      if (notes !== undefined) updateData.notes = notes;
+      if (trackingNumber !== undefined) updateData.trackingNumber = trackingNumber;
+      if (carrier !== undefined) updateData.carrier = carrier;
+
+      const updated = await storage.updateSupplierOrder(id, updateData);
+
+      res.json({
+        success: true,
+        data: updated,
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      res.status(500).json({
+        success: false,
+        error: errorMessage,
+      });
+    }
+  });
+
+  // Supplier Orders: Toggle flag
+  app.post("/api/supplier-orders/:id/flag", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { isFlagged, flagReason } = req.body;
+
+      const order = await storage.getSupplierOrder(id);
+      if (!order) {
+        return res.status(404).json({
+          success: false,
+          error: "Order not found",
+        });
+      }
+
+      const newFlagged = isFlagged !== undefined ? isFlagged : !order.isFlagged;
+      const updated = await storage.updateSupplierOrder(id, {
+        isFlagged: newFlagged,
+        flagReason: newFlagged ? (flagReason || "Manually flagged") : null,
+      });
+
+      res.json({
+        success: true,
+        data: updated,
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      res.status(500).json({
+        success: false,
+        error: errorMessage,
+      });
+    }
+  });
+
+  // Sync logs: Get recent sync logs
+  app.get("/api/gmail/sync-logs", async (req, res) => {
+    try {
+      const limit = parseInt(req.query.limit as string) || 20;
+      const logs = await storage.getRecentSyncLogs(limit);
+
+      res.json({
+        success: true,
+        data: logs,
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      res.status(500).json({
+        success: false,
+        error: errorMessage,
+      });
+    }
+  });
+
+  // ============================================================================
+  // Supplier Tracking Settings
+  // ============================================================================
+
+  // Get settings
+  app.get("/api/supplier-tracking/settings", async (req, res) => {
+    try {
+      const settings = await storage.getSupplierTrackingSettings();
+      res.json({
+        success: true,
+        data: settings,
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      res.status(500).json({
+        success: false,
+        error: errorMessage,
+      });
+    }
+  });
+
+  // Update settings
+  app.patch("/api/supplier-tracking/settings", async (req, res) => {
+    try {
+      const {
+        inTransitThresholdDays,
+        noTrackingThresholdDays,
+        autoFlagOverdue,
+        autoFlagCancelled,
+        autoFlagNoTracking,
+      } = req.body;
+
+      const updates: Record<string, any> = {};
+      if (typeof inTransitThresholdDays === "number") {
+        updates.inTransitThresholdDays = inTransitThresholdDays;
+      }
+      if (typeof noTrackingThresholdDays === "number") {
+        updates.noTrackingThresholdDays = noTrackingThresholdDays;
+      }
+      if (typeof autoFlagOverdue === "boolean") {
+        updates.autoFlagOverdue = autoFlagOverdue;
+      }
+      if (typeof autoFlagCancelled === "boolean") {
+        updates.autoFlagCancelled = autoFlagCancelled;
+      }
+      if (typeof autoFlagNoTracking === "boolean") {
+        updates.autoFlagNoTracking = autoFlagNoTracking;
+      }
+
+      const settings = await storage.updateSupplierTrackingSettings(updates);
+      res.json({
+        success: true,
+        data: settings,
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
       res.status(500).json({
         success: false,
         error: errorMessage,

@@ -33,8 +33,8 @@ const navItems = [
     icon: Package,
   },
   {
-    title: "Supplier Tracking",
-    url: "/supplier-tracking",
+    title: "Inbound Orders",
+    url: "/inbound-orders",
     icon: Truck,
   },
   {

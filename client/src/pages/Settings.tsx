@@ -1,4 +1,6 @@
 import ConnectionTestCard from "@/components/ConnectionTestCard";
+import GmailAccountsCard from "@/components/GmailAccountsCard";
+import SupplierTrackingSettingsCard from "@/components/SupplierTrackingSettingsCard";
 
 export default function Settings() {
   return (
@@ -6,11 +8,13 @@ export default function Settings() {
       <div>
         <h1 className="text-2xl font-semibold">Settings</h1>
         <p className="text-muted-foreground mt-1">
-          Manage your Amazon SP-API connection and preferences
+          Manage your connections and preferences
         </p>
       </div>
 
       <ConnectionTestCard />
+      <GmailAccountsCard />
+      <SupplierTrackingSettingsCard />
     </div>
   );
 }

@@ -11,6 +11,7 @@ import Settings from "@/pages/Settings";
 import SkuUpload from "@/pages/SkuUpload";
 import Orders from "@/pages/Orders";
 import Inventory from "@/pages/Inventory";
+import InboundOrders from "@/pages/InboundOrders";
 
 function Router() {
   return (
@@ -19,6 +20,7 @@ function Router() {
       <Route path="/sku-upload" component={SkuUpload} />
       <Route path="/orders" component={Orders} />
       <Route path="/inventory" component={Inventory} />
+      <Route path="/inbound-orders" component={InboundOrders} />
       <Route path="/settings" component={Settings} />
       <Route component={NotFound} />
     </Switch>

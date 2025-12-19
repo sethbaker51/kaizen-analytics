@@ -3,6 +3,7 @@ import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
 import { log } from "./log";
+import { startPollingScheduler } from "./emailSync";
 
 const app = express();
 const httpServer = createServer(app);
@@ -85,6 +86,10 @@ app.use((req, res, next) => {
     },
     () => {
       log(`serving on port ${port}`);
+
+      // Start email sync scheduler for supplier tracking
+      startPollingScheduler();
+      log("Email sync scheduler started");
     },
   );
 })();
