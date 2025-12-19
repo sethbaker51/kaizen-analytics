@@ -30,7 +30,11 @@
       "Bash(git merge:*)",
       "Bash(grep:*)",
       "WebFetch(domain:developer-docs.amazon.com)",
-      "WebFetch(domain:github.com)"
+      "WebFetch(domain:github.com)",
+      "Bash(pgrep:*)",
+      "Bash(find:*)",
+      "Bash(npm run build:*)",
+      "Bash(echo:*)"
     ]
   }
 }
