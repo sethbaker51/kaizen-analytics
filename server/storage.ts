@@ -593,4 +593,16 @@ export class MemStorage implements IStorage {
   }
 }
 
-export const storage = new MemStorage();
+import { DatabaseStorage } from "./databaseStorage";
+
+// Use DatabaseStorage if DATABASE_URL is set, otherwise fall back to MemStorage
+function createStorage(): IStorage {
+  if (process.env.DATABASE_URL) {
+    console.log("Using PostgreSQL database storage for persistence");
+    return new DatabaseStorage();
+  }
+  console.log("Warning: DATABASE_URL not set, using in-memory storage (data will not persist)");
+  return new MemStorage();
+}
+
+export const storage = createStorage();
