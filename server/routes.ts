@@ -1674,7 +1674,7 @@ MY-SKU-002,B07XJ8C8F5,29.99,50,new,true,true,Not Applicable`;
         });
       }
 
-      log("Starting supplier discovery scan", "gmail");
+      log("Starting supplier discovery scan (optimized)", "gmail");
 
       // Track unique suppliers by domain
       const supplierMap = new Map<string, {
@@ -1686,10 +1686,57 @@ MY-SKU-002,B07XJ8C8F5,29.99,50,new,true,true,Not Applicable`;
         sampleEmails: string[];
       }>();
 
-      // Query for potential supplier emails - broader search for discovery
+      // Domains to skip - personal email, marketing, social, etc.
+      const skipDomains = new Set([
+        // Personal email providers
+        "gmail.com", "yahoo.com", "hotmail.com", "outlook.com", "live.com",
+        "icloud.com", "aol.com", "protonmail.com", "msn.com", "me.com",
+        "mail.com", "ymail.com", "rocketmail.com", "comcast.net", "att.net",
+        "verizon.net", "sbcglobal.net", "cox.net", "charter.net",
+        // Marketing/Newsletter platforms
+        "mailchimp.com", "constantcontact.com", "hubspot.com", "sendgrid.net",
+        "sendgrid.com", "mailgun.org", "mailgun.com", "klaviyo.com",
+        "omnisend.com", "drip.com", "activecampaign.com", "getresponse.com",
+        "aweber.com", "convertkit.com", "sendinblue.com", "brevo.com",
+        "mailerlite.com", "campaign-archive.com", "list-manage.com",
+        "createsend.com", "cmail19.com", "cmail20.com", "em.sailthru.com",
+        "sailthru.com", "responsys.net", "epsilon.com", "cheetahmail.com",
+        "exacttarget.com", "salesforce.com", "pardot.com", "marketo.com",
+        // Social media
+        "facebook.com", "facebookmail.com", "twitter.com", "x.com",
+        "instagram.com", "linkedin.com", "pinterest.com", "tiktok.com",
+        // Payment processors (not suppliers)
+        "paypal.com", "stripe.com", "square.com", "venmo.com",
+        // Google services
+        "google.com", "youtube.com", "accounts.google.com",
+        // Other common non-suppliers
+        "noreply.github.com", "github.com", "gitlab.com",
+        "zoom.us", "slack.com", "notion.so", "dropbox.com",
+        "spotify.com", "netflix.com", "apple.com",
+      ]);
+
+      // Pattern to detect marketing/unsubscribe emails
+      const marketingPatterns = [
+        /unsubscribe/i, /opt.?out/i, /email preferences/i,
+        /manage.*subscription/i, /update.*preferences/i,
+        /newsletter/i, /weekly digest/i, /daily digest/i,
+        /promotional/i, /special offer/i, /limited time/i,
+        /exclusive deal/i, /% off/i, /sale ends/i,
+        /don't miss/i, /act now/i, /hurry/i,
+      ];
+
+      // Query excluding promotions, social, and forums
+      // Using keywords in subject AND excluding promotional categories
       const discoveryQuery = [
-        "subject:(order OR confirmation OR shipped OR tracking OR delivery OR invoice OR receipt OR purchase)",
-        "newer_than:60d",
+        "subject:(order OR confirmation OR shipped OR tracking OR delivery OR invoice OR receipt OR dispatch OR shipment)",
+        "-category:promotions",
+        "-category:social",
+        "-category:forums",
+        "-subject:newsletter",
+        "-subject:unsubscribe",
+        "-subject:\"special offer\"",
+        "-subject:\"limited time\"",
+        "newer_than:90d",
       ].join(" ");
 
       for (const account of enabledAccounts) {
@@ -1707,65 +1754,99 @@ MY-SKU-002,B07XJ8C8F5,29.99,50,new,true,true,Not Applicable`;
             accessToken = tokens.accessToken;
           }
 
-          // Fetch emails - get more for discovery
-          const emails = await gmail.getEmailList(accessToken, discoveryQuery, 500);
-          log(`Found ${emails.length} potential supplier emails for discovery`, "gmail");
+          // Step 1: Fetch email list (just IDs) - can get many more this way
+          const emails = await gmail.getEmailList(accessToken, discoveryQuery, 2000);
+          log(`Found ${emails.length} potential emails to scan`, "gmail");
 
-          // Process each email
-          for (const emailRef of emails) {
-            try {
-              const emailContent = await gmail.getEmailContent(accessToken, emailRef.id);
+          if (emails.length === 0) continue;
 
-              // Check if this looks like a supplier order email
-              if (!isSupplierOrderEmail(emailContent.subject, emailContent.body)) {
+          // Step 2: Batch fetch metadata (headers only) - much faster than full content
+          log(`Fetching metadata for ${emails.length} emails...`, "gmail");
+          const metadata = await gmail.batchGetEmailMetadata(
+            accessToken,
+            emails.map((e) => e.id)
+          );
+          log(`Retrieved metadata for ${metadata.length} emails`, "gmail");
+
+          // Step 3: Group by domain and collect sample subjects
+          const domainEmails = new Map<string, typeof metadata>();
+
+          for (const email of metadata) {
+            const supplierEmail = extractSupplierEmail(email.from);
+            if (!supplierEmail) continue;
+
+            const atIndex = supplierEmail.indexOf("@");
+            if (atIndex === -1) continue;
+            const domain = supplierEmail.substring(atIndex + 1).toLowerCase();
+
+            // Skip known non-supplier domains
+            if (skipDomains.has(domain)) continue;
+
+            // Skip if subject looks like marketing
+            const isMarketing = marketingPatterns.some((p) => p.test(email.subject));
+            if (isMarketing) continue;
+
+            const existing = domainEmails.get(domain);
+            if (existing) {
+              existing.push(email);
+            } else {
+              domainEmails.set(domain, [email]);
+            }
+          }
+
+          log(`Found ${domainEmails.size} unique sender domains`, "gmail");
+
+          // Step 4: For each domain, verify it looks like a supplier by checking a sample
+          for (const [domain, domainMetadata] of domainEmails) {
+            // Get sample emails for this domain
+            const samples = domainMetadata.slice(0, 5);
+            const sampleSubjects = [...new Set(samples.map((s) => s.subject))].slice(0, 3);
+            const sampleEmails = [...new Set(samples.map((s) => extractSupplierEmail(s.from)))].filter(Boolean) as string[];
+
+            // Use the first email's sender name
+            const supplierName = extractSupplierName(samples[0].from) ||
+              domain.split(".")[0].charAt(0).toUpperCase() + domain.split(".")[0].slice(1);
+
+            // Verify at least one email looks like a supplier order
+            // by fetching full content for one sample
+            let isValidSupplier = false;
+            for (const sample of samples.slice(0, 2)) {
+              try {
+                const fullContent = await gmail.getEmailContent(accessToken, sample.id);
+                if (isSupplierOrderEmail(fullContent.subject, fullContent.body)) {
+                  isValidSupplier = true;
+                  break;
+                }
+              } catch {
                 continue;
               }
+            }
 
-              // Extract supplier info
-              const supplierEmail = extractSupplierEmail(emailContent.from);
-              const supplierName = extractSupplierName(emailContent.from);
+            if (!isValidSupplier) continue;
 
-              if (!supplierEmail) continue;
-
-              // Extract domain
-              const atIndex = supplierEmail.indexOf("@");
-              if (atIndex === -1) continue;
-              const domain = supplierEmail.substring(atIndex + 1).toLowerCase();
-
-              // Skip common non-supplier domains
-              const skipDomains = [
-                "gmail.com", "yahoo.com", "hotmail.com", "outlook.com",
-                "icloud.com", "aol.com", "protonmail.com", "live.com",
-              ];
-              if (skipDomains.includes(domain)) continue;
-
-              // Update or create supplier entry
-              const existing = supplierMap.get(domain);
-              if (existing) {
-                existing.emailCount++;
-                if (existing.sampleSubjects.length < 3 && !existing.sampleSubjects.includes(emailContent.subject)) {
-                  existing.sampleSubjects.push(emailContent.subject);
+            // Update or create supplier entry
+            const existing = supplierMap.get(domain);
+            if (existing) {
+              existing.emailCount += domainMetadata.length;
+              for (const subj of sampleSubjects) {
+                if (existing.sampleSubjects.length < 3 && !existing.sampleSubjects.includes(subj)) {
+                  existing.sampleSubjects.push(subj);
                 }
-                if (!existing.sampleEmails.includes(supplierEmail)) {
-                  existing.sampleEmails.push(supplierEmail);
-                }
-                // Use the most common name
-                if (!existing.name && supplierName) {
-                  existing.name = supplierName;
-                }
-              } else {
-                supplierMap.set(domain, {
-                  name: supplierName || domain.split(".")[0],
-                  emailPattern: `@${domain}`,
-                  domain,
-                  emailCount: 1,
-                  sampleSubjects: [emailContent.subject],
-                  sampleEmails: [supplierEmail],
-                });
               }
-            } catch (emailError) {
-              // Skip individual email errors
-              continue;
+              for (const email of sampleEmails) {
+                if (!existing.sampleEmails.includes(email)) {
+                  existing.sampleEmails.push(email);
+                }
+              }
+            } else {
+              supplierMap.set(domain, {
+                name: supplierName,
+                emailPattern: `@${domain}`,
+                domain,
+                emailCount: domainMetadata.length,
+                sampleSubjects,
+                sampleEmails,
+              });
             }
           }
         } catch (accountError) {

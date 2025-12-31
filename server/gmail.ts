@@ -164,31 +164,131 @@ export async function getUserEmail(accessToken: string): Promise<string> {
 }
 
 /**
- * List emails matching a query
+ * List emails matching a query (with pagination support)
  */
 export async function getEmailList(
   accessToken: string,
   query: string,
   maxResults = 50
 ): Promise<EmailMessage[]> {
-  const params = new URLSearchParams({
-    q: query,
-    maxResults: maxResults.toString(),
-  });
+  const allMessages: EmailMessage[] = [];
+  let pageToken: string | undefined;
 
-  const response = await fetch(`${GMAIL_API_BASE}/users/me/messages?${params.toString()}`, {
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-    },
-  });
+  while (allMessages.length < maxResults) {
+    const params = new URLSearchParams({
+      q: query,
+      maxResults: Math.min(100, maxResults - allMessages.length).toString(),
+    });
+    if (pageToken) {
+      params.set("pageToken", pageToken);
+    }
+
+    const response = await fetch(`${GMAIL_API_BASE}/users/me/messages?${params.toString()}`, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Failed to list emails: ${errorText}`);
+    }
+
+    const data = await response.json();
+    const messages = data.messages || [];
+    allMessages.push(...messages);
+
+    pageToken = data.nextPageToken;
+    if (!pageToken || messages.length === 0) {
+      break;
+    }
+  }
+
+  return allMessages.slice(0, maxResults);
+}
+
+export interface EmailMetadata {
+  id: string;
+  threadId: string;
+  from: string;
+  subject: string;
+  date: Date;
+}
+
+/**
+ * Get email metadata (headers only) - much faster than full content
+ */
+export async function getEmailMetadata(
+  accessToken: string,
+  messageId: string
+): Promise<EmailMetadata> {
+  const response = await fetch(
+    `${GMAIL_API_BASE}/users/me/messages/${messageId}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date`,
+    {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    }
+  );
 
   if (!response.ok) {
     const errorText = await response.text();
-    throw new Error(`Failed to list emails: ${errorText}`);
+    throw new Error(`Failed to get email metadata: ${errorText}`);
   }
 
   const data = await response.json();
-  return data.messages || [];
+  const headers = data.payload?.headers || [];
+  const getHeader = (name: string): string => {
+    const header = headers.find((h: { name: string; value: string }) =>
+      h.name.toLowerCase() === name.toLowerCase()
+    );
+    return header?.value || "";
+  };
+
+  let date: Date;
+  try {
+    date = new Date(getHeader("Date"));
+    if (isNaN(date.getTime())) {
+      date = new Date(parseInt(data.internalDate));
+    }
+  } catch {
+    date = new Date(parseInt(data.internalDate));
+  }
+
+  return {
+    id: data.id,
+    threadId: data.threadId,
+    from: getHeader("From"),
+    subject: getHeader("Subject"),
+    date,
+  };
+}
+
+/**
+ * Batch get email metadata for multiple message IDs
+ */
+export async function batchGetEmailMetadata(
+  accessToken: string,
+  messageIds: string[],
+  onProgress?: (processed: number, total: number) => void
+): Promise<EmailMetadata[]> {
+  const results: EmailMetadata[] = [];
+  const batchSize = 50; // Process in batches to avoid overwhelming the API
+
+  for (let i = 0; i < messageIds.length; i += batchSize) {
+    const batch = messageIds.slice(i, i + batchSize);
+    const batchResults = await Promise.all(
+      batch.map((id) => getEmailMetadata(accessToken, id).catch(() => null))
+    );
+
+    results.push(...batchResults.filter((r): r is EmailMetadata => r !== null));
+
+    if (onProgress) {
+      onProgress(Math.min(i + batchSize, messageIds.length), messageIds.length);
+    }
+  }
+
+  return results;
 }
 
 /**
