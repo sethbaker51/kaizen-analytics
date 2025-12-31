@@ -2,7 +2,7 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage, type SupplierOrderFilters } from "./storage";
 import { log } from "./log";
-import { csvSkuRowSchema, type InsertSkuItem } from "@shared/schema";
+import { csvSkuRowSchema, csvSupplierWhitelistRowSchema, type InsertSkuItem } from "@shared/schema";
 import * as gmail from "./gmail";
 import * as emailSync from "./emailSync";
 
@@ -1907,6 +1907,189 @@ MY-SKU-002,B07XJ8C8F5,29.99,50,new,true,true,Not Applicable`;
         error: errorMessage,
       });
     }
+  });
+
+  // ============================================================================
+  // Supplier Whitelist
+  // ============================================================================
+
+  // Get all whitelist entries
+  app.get("/api/supplier-whitelist", async (req, res) => {
+    try {
+      const entries = await storage.getAllSupplierWhitelist();
+      res.json({
+        success: true,
+        data: entries,
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      res.status(500).json({
+        success: false,
+        error: errorMessage,
+      });
+    }
+  });
+
+  // Create a whitelist entry
+  app.post("/api/supplier-whitelist", async (req, res) => {
+    try {
+      const { name, emailPattern, notes } = req.body;
+
+      if (!name || !emailPattern) {
+        return res.status(400).json({
+          success: false,
+          error: "Name and email pattern are required",
+        });
+      }
+
+      const entry = await storage.createSupplierWhitelist({
+        name,
+        emailPattern,
+        notes: notes || null,
+        isActive: true,
+      });
+
+      log(`Created supplier whitelist entry: ${name} (${emailPattern})`, "whitelist");
+
+      res.json({
+        success: true,
+        data: entry,
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      res.status(500).json({
+        success: false,
+        error: errorMessage,
+      });
+    }
+  });
+
+  // Update a whitelist entry
+  app.patch("/api/supplier-whitelist/:id", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { name, emailPattern, notes, isActive } = req.body;
+
+      const updates: Record<string, any> = {};
+      if (name !== undefined) updates.name = name;
+      if (emailPattern !== undefined) updates.emailPattern = emailPattern;
+      if (notes !== undefined) updates.notes = notes;
+      if (isActive !== undefined) updates.isActive = isActive;
+
+      const entry = await storage.updateSupplierWhitelist(id, updates);
+
+      if (!entry) {
+        return res.status(404).json({
+          success: false,
+          error: "Whitelist entry not found",
+        });
+      }
+
+      log(`Updated supplier whitelist entry: ${entry.name}`, "whitelist");
+
+      res.json({
+        success: true,
+        data: entry,
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      res.status(500).json({
+        success: false,
+        error: errorMessage,
+      });
+    }
+  });
+
+  // Delete a whitelist entry
+  app.delete("/api/supplier-whitelist/:id", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const entry = await storage.getSupplierWhitelist(id);
+
+      if (!entry) {
+        return res.status(404).json({
+          success: false,
+          error: "Whitelist entry not found",
+        });
+      }
+
+      await storage.deleteSupplierWhitelist(id);
+      log(`Deleted supplier whitelist entry: ${entry.name}`, "whitelist");
+
+      res.json({
+        success: true,
+        message: "Whitelist entry deleted",
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      res.status(500).json({
+        success: false,
+        error: errorMessage,
+      });
+    }
+  });
+
+  // Import whitelist from CSV
+  app.post("/api/supplier-whitelist/import", async (req, res) => {
+    try {
+      const { data } = req.body;
+
+      if (!Array.isArray(data) || data.length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: "No data provided for import",
+        });
+      }
+
+      const results = {
+        success: 0,
+        failed: 0,
+        errors: [] as string[],
+      };
+
+      for (let i = 0; i < data.length; i++) {
+        const row = data[i];
+        try {
+          const validated = csvSupplierWhitelistRowSchema.parse(row);
+          await storage.createSupplierWhitelist({
+            name: validated.name,
+            emailPattern: validated.email_pattern,
+            notes: validated.notes || null,
+            isActive: true,
+          });
+          results.success++;
+        } catch (error) {
+          results.failed++;
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          results.errors.push(`Row ${i + 1}: ${errorMessage}`);
+        }
+      }
+
+      log(`Imported ${results.success} supplier whitelist entries (${results.failed} failed)`, "whitelist");
+
+      res.json({
+        success: true,
+        data: results,
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      res.status(500).json({
+        success: false,
+        error: errorMessage,
+      });
+    }
+  });
+
+  // Download whitelist template CSV
+  app.get("/api/supplier-whitelist/template", (req, res) => {
+    const template = `name,email_pattern,notes
+Amazon,@amazon.com,Amazon order notifications
+Alibaba,@alibaba.com,Alibaba supplier emails
+eBay,@ebay.com,eBay purchase notifications`;
+
+    res.setHeader("Content-Type", "text/csv");
+    res.setHeader("Content-Disposition", "attachment; filename=supplier-whitelist-template.csv");
+    res.send(template);
   });
 
   return httpServer;

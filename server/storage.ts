@@ -15,6 +15,8 @@ import {
   type InsertEmailSyncLog,
   type SupplierTrackingSettings,
   type InsertSupplierTrackingSettings,
+  type SupplierWhitelist,
+  type InsertSupplierWhitelist,
 } from "@shared/schema";
 import { randomUUID } from "crypto";
 
@@ -97,6 +99,15 @@ export interface IStorage {
   // Supplier Tracking Settings methods
   getSupplierTrackingSettings(): Promise<SupplierTrackingSettings>;
   updateSupplierTrackingSettings(data: Partial<InsertSupplierTrackingSettings>): Promise<SupplierTrackingSettings>;
+
+  // Supplier Whitelist methods
+  createSupplierWhitelist(entry: InsertSupplierWhitelist): Promise<SupplierWhitelist>;
+  getSupplierWhitelist(id: string): Promise<SupplierWhitelist | undefined>;
+  getAllSupplierWhitelist(): Promise<SupplierWhitelist[]>;
+  getActiveSupplierWhitelist(): Promise<SupplierWhitelist[]>;
+  updateSupplierWhitelist(id: string, data: Partial<InsertSupplierWhitelist>): Promise<SupplierWhitelist | undefined>;
+  deleteSupplierWhitelist(id: string): Promise<boolean>;
+  isEmailWhitelisted(email: string): Promise<boolean>;
 }
 
 export class MemStorage implements IStorage {
@@ -108,6 +119,7 @@ export class MemStorage implements IStorage {
   private supplierOrderItems: Map<string, SupplierOrderItem>;
   private emailSyncLogs: Map<string, EmailSyncLog>;
   private supplierTrackingSettings: SupplierTrackingSettings | null;
+  private supplierWhitelistEntries: Map<string, SupplierWhitelist>;
 
   constructor() {
     this.users = new Map();
@@ -118,6 +130,7 @@ export class MemStorage implements IStorage {
     this.supplierOrderItems = new Map();
     this.emailSyncLogs = new Map();
     this.supplierTrackingSettings = null;
+    this.supplierWhitelistEntries = new Map();
   }
 
   // User methods
@@ -595,6 +608,99 @@ export class MemStorage implements IStorage {
       updatedAt: new Date(),
     };
     return this.supplierTrackingSettings;
+  }
+
+  // Supplier Whitelist methods
+  async createSupplierWhitelist(insertEntry: InsertSupplierWhitelist): Promise<SupplierWhitelist> {
+    const id = randomUUID();
+    const now = new Date();
+    // Extract domain from email pattern
+    const domain = this.extractDomainFromPattern(insertEntry.emailPattern);
+    const entry: SupplierWhitelist = {
+      id,
+      name: insertEntry.name,
+      emailPattern: insertEntry.emailPattern.toLowerCase(),
+      domain,
+      isActive: insertEntry.isActive ?? true,
+      notes: insertEntry.notes ?? null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.supplierWhitelistEntries.set(id, entry);
+    return entry;
+  }
+
+  private extractDomainFromPattern(pattern: string): string | null {
+    // Extract domain from patterns like "@amazon.com" or "orders@supplier.com"
+    const atIndex = pattern.indexOf("@");
+    if (atIndex === -1) return null;
+    return pattern.substring(atIndex + 1).toLowerCase();
+  }
+
+  async getSupplierWhitelist(id: string): Promise<SupplierWhitelist | undefined> {
+    return this.supplierWhitelistEntries.get(id);
+  }
+
+  async getAllSupplierWhitelist(): Promise<SupplierWhitelist[]> {
+    return Array.from(this.supplierWhitelistEntries.values())
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  async getActiveSupplierWhitelist(): Promise<SupplierWhitelist[]> {
+    return Array.from(this.supplierWhitelistEntries.values())
+      .filter((e) => e.isActive)
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  async updateSupplierWhitelist(
+    id: string,
+    data: Partial<InsertSupplierWhitelist>
+  ): Promise<SupplierWhitelist | undefined> {
+    const entry = this.supplierWhitelistEntries.get(id);
+    if (!entry) return undefined;
+
+    const domain = data.emailPattern
+      ? this.extractDomainFromPattern(data.emailPattern)
+      : entry.domain;
+
+    const updated: SupplierWhitelist = {
+      ...entry,
+      ...data,
+      emailPattern: data.emailPattern?.toLowerCase() ?? entry.emailPattern,
+      domain,
+      id,
+      updatedAt: new Date(),
+    };
+    this.supplierWhitelistEntries.set(id, updated);
+    return updated;
+  }
+
+  async deleteSupplierWhitelist(id: string): Promise<boolean> {
+    return this.supplierWhitelistEntries.delete(id);
+  }
+
+  async isEmailWhitelisted(email: string): Promise<boolean> {
+    const activeEntries = await this.getActiveSupplierWhitelist();
+
+    // If no whitelist entries, allow all emails (whitelist not configured)
+    if (activeEntries.length === 0) return true;
+
+    const emailLower = email.toLowerCase();
+
+    for (const entry of activeEntries) {
+      const pattern = entry.emailPattern.toLowerCase();
+
+      // Check for exact match
+      if (emailLower === pattern) return true;
+
+      // Check for domain match (pattern starts with @)
+      if (pattern.startsWith("@") && emailLower.endsWith(pattern)) return true;
+
+      // Check for partial match (pattern is contained in email)
+      if (emailLower.includes(pattern)) return true;
+    }
+
+    return false;
   }
 }
 

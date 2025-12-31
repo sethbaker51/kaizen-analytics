@@ -12,11 +12,11 @@ const SYNC_INTERVAL_MS = parseInt(process.env.EMAIL_SYNC_INTERVAL_MS || "300000"
 // Gmail query for supplier-related emails
 const SUPPLIER_EMAIL_QUERY = [
   "subject:(order OR confirmation OR shipped OR tracking OR delivery OR invoice)",
-  "newer_than:7d",
+  "newer_than:30d",
 ].join(" ");
 
 // Maximum emails to process per sync
-const MAX_EMAILS_PER_SYNC = 50;
+const MAX_EMAILS_PER_SYNC = 200;
 
 let syncIntervalId: NodeJS.Timeout | null = null;
 
@@ -196,6 +196,15 @@ export async function syncAccount(accountId: string): Promise<SyncResult> {
 
         // Parse the email
         const parsed = parseSupplierEmail(emailContent);
+
+        // Check if sender is whitelisted (if whitelist is configured)
+        if (parsed.supplierEmail) {
+          const isWhitelisted = await storage.isEmailWhitelisted(parsed.supplierEmail);
+          if (!isWhitelisted) {
+            log(`Skipping non-whitelisted sender: ${parsed.supplierEmail}`, "email-sync");
+            continue;
+          }
+        }
 
         // Try to find an existing order to update
         const existingOrder = await storage.findMatchingOrder(

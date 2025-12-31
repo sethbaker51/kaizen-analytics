@@ -9,6 +9,7 @@ import {
   supplierOrderItems,
   emailSyncLogs,
   supplierTrackingSettings,
+  supplierWhitelist,
   type User,
   type InsertUser,
   type SkuUpload,
@@ -25,6 +26,8 @@ import {
   type InsertEmailSyncLog,
   type SupplierTrackingSettings,
   type InsertSupplierTrackingSettings,
+  type SupplierWhitelist,
+  type InsertSupplierWhitelist,
 } from "@shared/schema";
 import { IStorage, SupplierOrderFilters, SupplierOrderStats } from "./storage";
 
@@ -357,5 +360,91 @@ export class DatabaseStorage implements IStorage {
       .returning();
 
     return updated;
+  }
+
+  // Supplier Whitelist methods
+  private extractDomainFromPattern(pattern: string): string | null {
+    const atIndex = pattern.indexOf("@");
+    if (atIndex === -1) return null;
+    return pattern.substring(atIndex + 1).toLowerCase();
+  }
+
+  async createSupplierWhitelist(insertEntry: InsertSupplierWhitelist): Promise<SupplierWhitelist> {
+    const domain = this.extractDomainFromPattern(insertEntry.emailPattern);
+    const [entry] = await db.insert(supplierWhitelist).values({
+      ...insertEntry,
+      emailPattern: insertEntry.emailPattern.toLowerCase(),
+      domain,
+    }).returning();
+    return entry;
+  }
+
+  async getSupplierWhitelist(id: string): Promise<SupplierWhitelist | undefined> {
+    const [entry] = await db.select().from(supplierWhitelist).where(eq(supplierWhitelist.id, id));
+    return entry;
+  }
+
+  async getAllSupplierWhitelist(): Promise<SupplierWhitelist[]> {
+    return db.select().from(supplierWhitelist).orderBy(supplierWhitelist.name);
+  }
+
+  async getActiveSupplierWhitelist(): Promise<SupplierWhitelist[]> {
+    return db.select().from(supplierWhitelist)
+      .where(eq(supplierWhitelist.isActive, true))
+      .orderBy(supplierWhitelist.name);
+  }
+
+  async updateSupplierWhitelist(
+    id: string,
+    data: Partial<InsertSupplierWhitelist>
+  ): Promise<SupplierWhitelist | undefined> {
+    const domain = data.emailPattern
+      ? this.extractDomainFromPattern(data.emailPattern)
+      : undefined;
+
+    const updateData: Record<string, any> = {
+      ...data,
+      updatedAt: new Date(),
+    };
+
+    if (data.emailPattern) {
+      updateData.emailPattern = data.emailPattern.toLowerCase();
+      updateData.domain = domain;
+    }
+
+    const [updated] = await db.update(supplierWhitelist)
+      .set(updateData)
+      .where(eq(supplierWhitelist.id, id))
+      .returning();
+    return updated;
+  }
+
+  async deleteSupplierWhitelist(id: string): Promise<boolean> {
+    const result = await db.delete(supplierWhitelist).where(eq(supplierWhitelist.id, id));
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  async isEmailWhitelisted(email: string): Promise<boolean> {
+    const activeEntries = await this.getActiveSupplierWhitelist();
+
+    // If no whitelist entries, allow all emails (whitelist not configured)
+    if (activeEntries.length === 0) return true;
+
+    const emailLower = email.toLowerCase();
+
+    for (const entry of activeEntries) {
+      const pattern = entry.emailPattern.toLowerCase();
+
+      // Check for exact match
+      if (emailLower === pattern) return true;
+
+      // Check for domain match (pattern starts with @)
+      if (pattern.startsWith("@") && emailLower.endsWith(pattern)) return true;
+
+      // Check for partial match (pattern is contained in email)
+      if (emailLower.includes(pattern)) return true;
+    }
+
+    return false;
   }
 }

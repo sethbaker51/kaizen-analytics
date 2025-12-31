@@ -225,3 +225,31 @@ export const insertSupplierTrackingSettingsSchema = createInsertSchema(supplierT
 
 export type InsertSupplierTrackingSettings = z.infer<typeof insertSupplierTrackingSettingsSchema>;
 export type SupplierTrackingSettings = typeof supplierTrackingSettings.$inferSelect;
+
+// Supplier Whitelist - approved suppliers for order tracking
+export const supplierWhitelist = pgTable("supplier_whitelist", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  name: text("name").notNull(),
+  emailPattern: text("email_pattern").notNull(), // e.g., "@amazon.com" or "orders@supplier.com"
+  domain: text("domain"), // e.g., "amazon.com" - extracted for quick matching
+  isActive: boolean("is_active").default(true).notNull(),
+  notes: text("notes"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertSupplierWhitelistSchema = createInsertSchema(supplierWhitelist).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertSupplierWhitelist = z.infer<typeof insertSupplierWhitelistSchema>;
+export type SupplierWhitelist = typeof supplierWhitelist.$inferSelect;
+
+// CSV upload schema for supplier whitelist
+export const csvSupplierWhitelistRowSchema = z.object({
+  name: z.string().min(1, "Supplier name is required"),
+  email_pattern: z.string().min(1, "Email pattern is required"),
+  notes: z.string().optional(),
+});
