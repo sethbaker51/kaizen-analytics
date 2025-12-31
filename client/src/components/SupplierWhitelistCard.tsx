@@ -38,6 +38,8 @@ import {
   Sparkles,
   CheckCircle2,
   Package,
+  ChevronDown,
+  ChevronUp,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
@@ -65,6 +67,7 @@ interface DiscoveredSupplier {
 export default function SupplierWhitelistCard() {
   const [entries, setEntries] = useState<WhitelistEntry[]>([]);
   const [loading, setLoading] = useState(true);
+  const [isCollapsed, setIsCollapsed] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState<WhitelistEntry | null>(null);
   const [editEntry, setEditEntry] = useState<WhitelistEntry | null>(null);
   const [showAddDialog, setShowAddDialog] = useState(false);
@@ -403,62 +406,81 @@ export default function SupplierWhitelistCard() {
   const selectedCount = discoveredSuppliers.filter((s) => s.selected && !s.alreadyWhitelisted).length;
   const selectableCount = discoveredSuppliers.filter((s) => !s.alreadyWhitelisted).length;
 
+  const activeCount = entries.filter((e) => e.isActive).length;
+
   return (
     <Card className="w-full">
-      <CardHeader>
+      <CardHeader className="pb-3">
         <div className="flex items-center justify-between flex-wrap gap-2">
-          <div className="flex items-center gap-2">
+          <button
+            onClick={() => setIsCollapsed(!isCollapsed)}
+            className="flex items-center gap-2 hover:opacity-80 transition-opacity"
+          >
             <Shield className="h-5 w-5 text-primary" />
             <CardTitle className="text-lg">Supplier Whitelist</CardTitle>
-          </div>
-          <div className="flex gap-2 flex-wrap">
-            <input
-              type="file"
-              ref={fileInputRef}
-              accept=".csv"
-              onChange={handleFileUpload}
-              className="hidden"
-            />
-            <Button
-              variant="default"
-              size="sm"
-              onClick={handleDiscover}
-              disabled={discovering}
-            >
-              {discovering ? (
-                <Loader2 className="h-4 w-4 mr-1 animate-spin" />
-              ) : (
-                <Sparkles className="h-4 w-4 mr-1" />
-              )}
-              Discover Suppliers
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => window.open("/api/supplier-whitelist/template", "_blank")}
-            >
-              <Download className="h-4 w-4 mr-1" />
-              Template
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => fileInputRef.current?.click()}
-            >
-              <Upload className="h-4 w-4 mr-1" />
-              Import
-            </Button>
-            <Button variant="outline" size="sm" onClick={openAddDialog}>
-              <Plus className="h-4 w-4 mr-1" />
-              Add
-            </Button>
-          </div>
+            {entries.length > 0 && (
+              <Badge variant="secondary" className="ml-1">
+                {activeCount}/{entries.length} active
+              </Badge>
+            )}
+            {isCollapsed ? (
+              <ChevronDown className="h-4 w-4 text-muted-foreground" />
+            ) : (
+              <ChevronUp className="h-4 w-4 text-muted-foreground" />
+            )}
+          </button>
+          {!isCollapsed && (
+            <div className="flex gap-2 flex-wrap">
+              <input
+                type="file"
+                ref={fileInputRef}
+                accept=".csv"
+                onChange={handleFileUpload}
+                className="hidden"
+              />
+              <Button
+                variant="default"
+                size="sm"
+                onClick={handleDiscover}
+                disabled={discovering}
+              >
+                {discovering ? (
+                  <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                ) : (
+                  <Sparkles className="h-4 w-4 mr-1" />
+                )}
+                Discover Suppliers
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => window.open("/api/supplier-whitelist/template", "_blank")}
+              >
+                <Download className="h-4 w-4 mr-1" />
+                Template
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => fileInputRef.current?.click()}
+              >
+                <Upload className="h-4 w-4 mr-1" />
+                Import
+              </Button>
+              <Button variant="outline" size="sm" onClick={openAddDialog}>
+                <Plus className="h-4 w-4 mr-1" />
+                Add
+              </Button>
+            </div>
+          )}
         </div>
-        <CardDescription>
-          Only emails from whitelisted suppliers will be tracked. Use "Discover Suppliers" to scan your inbox.
-        </CardDescription>
+        {!isCollapsed && (
+          <CardDescription>
+            Only emails from whitelisted suppliers will be tracked. Use "Discover Suppliers" to scan your inbox.
+          </CardDescription>
+        )}
       </CardHeader>
-      <CardContent>
+      {!isCollapsed && <CardContent>
         {loading && (
           <div className="flex items-center justify-center py-8">
             <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
@@ -533,7 +555,7 @@ export default function SupplierWhitelistCard() {
             ))}
           </div>
         )}
-      </CardContent>
+      </CardContent>}
 
       {/* Discovery Dialog */}
       <Dialog open={showDiscoverDialog} onOpenChange={setShowDiscoverDialog}>

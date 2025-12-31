@@ -27,6 +27,16 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import {
   Truck,
   Calendar,
   Package,
@@ -36,6 +46,7 @@ import {
   Save,
   Loader2,
   ShoppingCart,
+  Trash2,
 } from "lucide-react";
 
 interface SupplierOrderItem {
@@ -52,6 +63,7 @@ interface SupplierOrderItem {
 interface SupplierOrder {
   id: string;
   gmailAccountId: string;
+  gmailAccountEmail?: string | null;
   emailMessageId: string;
   supplierName: string | null;
   supplierEmail: string | null;
@@ -78,6 +90,7 @@ interface SupplierOrderDetailDialogProps {
   order: SupplierOrder | null;
   onClose: () => void;
   onSave?: () => void;
+  onDelete?: () => void;
 }
 
 const STATUS_OPTIONS = [
@@ -91,11 +104,26 @@ const STATUS_OPTIONS = [
 ];
 
 const CARRIER_OPTIONS = [
+  // US Carriers
   { value: "UPS", label: "UPS" },
   { value: "FedEx", label: "FedEx" },
   { value: "USPS", label: "USPS" },
   { value: "DHL", label: "DHL" },
   { value: "Amazon", label: "Amazon Logistics" },
+  // UK Carriers
+  { value: "Royal Mail", label: "Royal Mail" },
+  { value: "Parcelforce", label: "Parcelforce" },
+  { value: "DPD", label: "DPD" },
+  { value: "Evri", label: "Evri (Hermes)" },
+  { value: "APC", label: "APC Overnight" },
+  { value: "DX", label: "DX Express" },
+  { value: "Yodel", label: "Yodel" },
+  { value: "UKMail", label: "UK Mail" },
+  { value: "CollectPlus", label: "Collect+" },
+  { value: "InPost", label: "InPost" },
+  // Other
+  { value: "GLS", label: "GLS" },
+  { value: "TNT", label: "TNT" },
   { value: "Other", label: "Other" },
 ];
 
@@ -103,6 +131,7 @@ export default function SupplierOrderDetailDialog({
   order,
   onClose,
   onSave,
+  onDelete,
 }: SupplierOrderDetailDialogProps) {
   const [status, setStatus] = useState(order?.status || "pending");
   const [trackingNumber, setTrackingNumber] = useState(order?.trackingNumber || "");
@@ -115,6 +144,8 @@ export default function SupplierOrderDetailDialog({
   );
   const [notes, setNotes] = useState(order?.notes || "");
   const [isFlagged, setIsFlagged] = useState(order?.isFlagged || false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [saving, setSaving] = useState(false);
   const [items, setItems] = useState<SupplierOrderItem[]>([]);
   const [loadingItems, setLoadingItems] = useState(false);
@@ -185,6 +216,27 @@ export default function SupplierOrderDetailDialog({
       console.error("Failed to save order:", error);
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!order) return;
+
+    setDeleting(true);
+    try {
+      const response = await fetch(`/api/supplier-orders/${order.id}`, {
+        method: "DELETE",
+      });
+
+      if (response.ok) {
+        onDelete?.();
+        onClose();
+      }
+    } catch (error) {
+      console.error("Failed to delete order:", error);
+    } finally {
+      setDeleting(false);
+      setShowDeleteConfirm(false);
     }
   };
 
@@ -451,7 +503,10 @@ export default function SupplierOrderDetailDialog({
                 {order.emailMessageId && (
                   <Button variant="outline" size="sm" asChild>
                     <a
-                      href={`https://mail.google.com/mail/u/0/#inbox/${order.emailMessageId}`}
+                      href={order.gmailAccountEmail
+                        ? `https://mail.google.com/mail/u/?authuser=${encodeURIComponent(order.gmailAccountEmail)}#inbox/${order.emailMessageId}`
+                        : `https://mail.google.com/mail/u/0/#inbox/${order.emailMessageId}`
+                      }
                       target="_blank"
                       rel="noopener noreferrer"
                       className="flex items-center gap-1"
@@ -472,38 +527,97 @@ export default function SupplierOrderDetailDialog({
           )}
 
           {/* Actions */}
-          <div className="flex justify-end gap-2 pt-4 border-t">
-            <Button variant="outline" onClick={onClose}>
-              Cancel
+          <div className="flex justify-between pt-4 border-t">
+            <Button
+              variant="destructive"
+              onClick={() => setShowDeleteConfirm(true)}
+              disabled={deleting}
+            >
+              <Trash2 className="h-4 w-4 mr-2" />
+              Delete
             </Button>
-            <Button onClick={handleSave} disabled={saving}>
-              {saving ? (
-                <>
-                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                  Saving...
-                </>
-              ) : (
-                <>
-                  <Save className="h-4 w-4 mr-2" />
-                  Save Changes
-                </>
-              )}
-            </Button>
+            <div className="flex gap-2">
+              <Button variant="outline" onClick={onClose}>
+                Cancel
+              </Button>
+              <Button onClick={handleSave} disabled={saving}>
+                {saving ? (
+                  <>
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                    Saving...
+                  </>
+                ) : (
+                  <>
+                    <Save className="h-4 w-4 mr-2" />
+                    Save Changes
+                  </>
+                )}
+              </Button>
+            </div>
           </div>
         </div>
       </DialogContent>
+
+      {/* Delete Confirmation */}
+      <AlertDialog open={showDeleteConfirm} onOpenChange={setShowDeleteConfirm}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete Order</AlertDialogTitle>
+            <AlertDialogDescription>
+              Are you sure you want to delete this order from {order?.supplierName}?
+              {order?.orderNumber && ` (Order #${order.orderNumber})`}
+              {" "}This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleting}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleDelete}
+              disabled={deleting}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              {deleting ? (
+                <>
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  Deleting...
+                </>
+              ) : (
+                "Delete"
+              )}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </Dialog>
   );
 }
 
 function getTrackingUrl(carrier: string, trackingNumber: string): string {
   const urls: Record<string, string> = {
+    // US Carriers
     UPS: `https://www.ups.com/track?tracknum=${trackingNumber}`,
     FedEx: `https://www.fedex.com/fedextrack/?trknbr=${trackingNumber}`,
     USPS: `https://tools.usps.com/go/TrackConfirmAction?tLabels=${trackingNumber}`,
-    DHL: `https://www.dhl.com/us-en/home/tracking/tracking-global-forwarding.html?submit=1&tracking-id=${trackingNumber}`,
+    DHL: `https://www.dhl.com/gb-en/home/tracking/tracking-parcel.html?submit=1&tracking-id=${trackingNumber}`,
     Amazon: `https://track.amazon.com/tracking/${trackingNumber}`,
+
+    // UK Carriers
+    "Royal Mail": `https://www.royalmail.com/track-your-item#/tracking-results/${trackingNumber}`,
+    Parcelforce: `https://www.parcelforce.com/track-trace?trackNumber=${trackingNumber}`,
+    DPD: `https://www.dpd.co.uk/tracking/trackingSearch.do?search.searchType=0&search.parcelNumber=${trackingNumber}`,
+    Evri: `https://www.evri.com/track/parcel/${trackingNumber}`,
+    APC: `https://apc-overnight.com/track-parcel.php?tracking=${trackingNumber}`,
+    DX: `https://www.dx.uk.com/tracking/${trackingNumber}`,
+    Yodel: `https://www.yodel.co.uk/tracking/${trackingNumber}`,
+    UKMail: `https://www.ukmail.com/manage-my-delivery/track-my-parcel/?parcelNumber=${trackingNumber}`,
+    "DHL Parcel UK": `https://www.dhl.com/gb-en/home/tracking/tracking-parcel.html?submit=1&tracking-id=${trackingNumber}`,
+    CollectPlus: `https://www.collectplus.co.uk/track/${trackingNumber}`,
+    InPost: `https://inpost.co.uk/track-your-parcel?parcel=${trackingNumber}`,
+
+    // Other Carriers
+    GLS: `https://gls-group.eu/GB/en/parcel-tracking?match=${trackingNumber}`,
+    TNT: `https://www.tnt.com/express/en_gb/site/tracking.html?searchType=con&cons=${trackingNumber}`,
   };
 
-  return urls[carrier] || `https://www.google.com/search?q=${trackingNumber}+tracking`;
+  return urls[carrier] || `https://www.google.com/search?q=${encodeURIComponent(trackingNumber)}+tracking+${encodeURIComponent(carrier || '')}`;
 }

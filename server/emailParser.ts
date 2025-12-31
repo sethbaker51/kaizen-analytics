@@ -3,6 +3,84 @@
 import type { EmailDetails } from "./gmail";
 import type { SupplierOrderStatus } from "@shared/schema";
 
+// Courier/Carrier domains - these are NOT suppliers, they deliver packages
+// Emails from these domains should update existing orders, not create new ones
+export const COURIER_DOMAINS = new Set([
+  // US Carriers
+  "ups.com",
+  "fedex.com",
+  "usps.com",
+  "usps.gov",
+  "dhl.com",
+  "dhl.de",
+  "ontrac.com",
+  "lasership.com",
+
+  // UK Carriers
+  "royalmail.com",
+  "royalmail.co.uk",
+  "parcelforce.com",
+  "parcelforce.co.uk",
+  "dpd.co.uk",
+  "dpd.com",
+  "dpdlocal.co.uk",
+  "evri.com",
+  "hermes-europe.co.uk",
+  "myhermes.co.uk",
+  "apc-overnight.com",
+  "apc-plc.com",
+  "dxdelivery.com",
+  "thedx.co.uk",
+  "yodel.co.uk",
+  "yodeldirect.co.uk",
+  "ukmail.com",
+  "collectplus.co.uk",
+  "inpost.co.uk",
+  "inpost.pl",
+
+  // European/International
+  "gls-group.eu",
+  "gls-group.com",
+  "tnt.com",
+  "tnt.co.uk",
+  "purolator.com",
+  "canadapost.ca",
+  "postnl.nl",
+  "bpost.be",
+  "laposte.fr",
+  "deutschepost.de",
+  "correos.es",
+  "poste.it",
+
+  // Logistics/Delivery platforms
+  "track.aftership.com",
+  "aftership.com",
+  "ship24.com",
+  "17track.net",
+  "parcelsapp.com",
+]);
+
+/**
+ * Check if an email domain belongs to a courier/carrier
+ */
+export function isCourierDomain(email: string): boolean {
+  if (!email) return false;
+  const atIndex = email.indexOf("@");
+  if (atIndex === -1) return false;
+  const domain = email.substring(atIndex + 1).toLowerCase();
+  return COURIER_DOMAINS.has(domain);
+}
+
+/**
+ * Extract domain from email address
+ */
+export function extractDomainFromEmail(email: string): string | null {
+  if (!email) return null;
+  const atIndex = email.indexOf("@");
+  if (atIndex === -1) return null;
+  return email.substring(atIndex + 1).toLowerCase();
+}
+
 export interface ParsedOrderData {
   supplierName: string | null;
   supplierEmail: string | null;
@@ -47,33 +125,79 @@ const TRACKING_PATTERNS = [
   // USPS: 20-22 digits or specific formats
   { pattern: /\b(9[2-5]\d{20,22})\b/, carrier: "USPS" },
   { pattern: /\b(420\d{5}9[2-5]\d{20,22})\b/, carrier: "USPS" },
-  // DHL: 10 or 11 digits
+  // DHL: 10 or 11 digits (with DHL context) or JD followed by digits
   { pattern: /\b(\d{10,11})\b(?=.*dhl)/i, carrier: "DHL" },
+  { pattern: /(JD\d{18})/i, carrier: "DHL" },
   // Amazon Logistics: TBA followed by digits
   { pattern: /(TBA\d{12,})/i, carrier: "Amazon" },
-  // Generic tracking with keyword context
+
+  // UK Carriers
+  // Royal Mail: 2 letters + 9 digits + 2 letters (e.g., AA123456789GB)
+  { pattern: /\b([A-Z]{2}\d{9}GB)\b/i, carrier: "Royal Mail" },
+  // Royal Mail tracked 24/48: often starts with specific prefixes
+  { pattern: /\b(JD\d{18})\b/i, carrier: "Royal Mail" },
+  { pattern: /\b([A-Z]{2}\d{9}[A-Z]{2})\b(?=.*royal\s*mail)/i, carrier: "Royal Mail" },
+
+  // Parcelforce: Various formats - often 2 letters + numbers + GB or just numbers
+  { pattern: /\b([A-Z]{2}\d{7,9}GB)\b/i, carrier: "Parcelforce" },
+  { pattern: /\b(P[A-Z]\d{9}GB)\b/i, carrier: "Parcelforce" },
+
+  // DPD: Usually 14 digits or alphanumeric
+  { pattern: /\b(\d{14})\b(?=.*dpd)/i, carrier: "DPD" },
+  { pattern: /\b([0-9]{14})\b(?!\d)/, carrier: "DPD" },
+
+  // Evri (formerly Hermes): Various formats, often starts with H or numeric
+  { pattern: /(H[A-Z0-9]{15,})/i, carrier: "Evri" },
+  { pattern: /\b(\d{16})\b(?=.*(?:evri|hermes))/i, carrier: "Evri" },
+
+  // APC Overnight: Various alphanumeric formats
+  { pattern: /\b([A-Z0-9]{10,20})\b(?=.*apc)/i, carrier: "APC" },
+
+  // DX Express: Often starts with DX or alphanumeric
+  { pattern: /(DX[A-Z0-9]{8,})/i, carrier: "DX" },
+  { pattern: /\b([A-Z0-9]{10,15})\b(?=.*\bdx\b)/i, carrier: "DX" },
+
+  // Yodel: Various formats
+  { pattern: /(JD\d{16,})/i, carrier: "Yodel" },
+  { pattern: /\b([A-Z0-9]{12,18})\b(?=.*yodel)/i, carrier: "Yodel" },
+
+  // UKMail (now DHL Parcel UK)
+  { pattern: /\b(\d{12,16})\b(?=.*ukmail)/i, carrier: "UKMail" },
+
+  // Generic tracking with keyword context (fallback)
   { pattern: /tracking\s*(?:#|number|no\.?|id)?[:\s]*([A-Z0-9]{10,30})/i, carrier: null },
   { pattern: /track(?:ing)?\s+(?:your\s+)?(?:package|shipment|order)[:\s]*([A-Z0-9]{10,30})/i, carrier: null },
 ];
 
-// Carrier detection patterns - expanded for more carriers
+// Carrier detection patterns - expanded for more carriers including UK
 const CARRIER_PATTERNS: Record<string, RegExp> = {
+  // US Carriers
   UPS: /\bups\b|united\s+parcel|1Z[A-Z0-9]{16}/i,
   FedEx: /\bfedex\b|federal\s+express/i,
   USPS: /\busps\b|postal\s+service|united\s+states\s+postal|first[\s-]?class|priority\s+mail/i,
-  DHL: /\bdhl\b|deutsche\s+post/i,
+  DHL: /\bdhl\b|deutsche\s+post|dhl\s*express|dhl\s*parcel/i,
   Amazon: /\bamazon\s+logistics\b|amzl|TBA\d{12,}/i,
   OnTrac: /\bontrac\b/i,
   LaserShip: /\blasership\b/i,
-  Spee_Dee: /\bspee[\s-]?dee\b/i,
+
+  // UK Carriers
+  "Royal Mail": /\broyal\s*mail\b|rm\s+tracked|special\s+delivery|signed\s+for/i,
+  Parcelforce: /\bparcelforce\b|parcel\s*force/i,
+  DPD: /\bdpd\b|dpd\s*local|dpd\s*uk/i,
+  Evri: /\bevri\b|\bhermes\b|myhermes/i,
+  APC: /\bapc\b|apc\s*overnight/i,
+  DX: /\bdx\b|dx\s*express|dx\s*delivery/i,
+  Yodel: /\byodel\b/i,
+  UKMail: /\bukmail\b|uk\s*mail/i,
+  "DHL Parcel UK": /\bdhl\s*parcel\s*uk\b/i,
+  CollectPlus: /\bcollect\s*plus\b|\bcollect\+/i,
+  InPost: /\binpost\b/i,
+
+  // Other carriers
   GLS: /\bgls\b|general\s+logistics/i,
   Purolator: /\bpurolator\b/i,
   Canada_Post: /\bcanada\s+post\b/i,
-  LSO: /\blso\b|lone\s+star\s+overnight/i,
-  Saia: /\bsaia\b/i,
-  Estes: /\bestes\b/i,
-  XPO: /\bxpo\b/i,
-  "R+L": /\br\+l\s+carriers\b|r\s*\+\s*l/i,
+  TNT: /\btnt\b|tnt\s*express/i,
 };
 
 // Date patterns
@@ -419,34 +543,154 @@ export function parseSupplierEmail(email: EmailDetails): ParsedOrderData {
 }
 
 /**
- * Check if an email is likely a supplier order email
+ * Check if an email is likely a supplier order email (not promotional)
+ *
+ * Strategy:
+ * 1. First check for STRONG order indicators (order #, tracking #, etc.)
+ *    - If found, it's an order email regardless of promotional content in footer
+ * 2. If no strong indicators, check if the SUBJECT looks promotional
+ *    - Promotional subjects = not an order email
+ * 3. Check for weak order indicators as fallback
  */
 export function isSupplierOrderEmail(subject: string, body: string): boolean {
   const text = `${subject} ${body}`.toLowerCase();
+  const subjectLower = subject.toLowerCase();
 
-  // Keywords that suggest this is an order-related email
-  const orderKeywords = [
-    "order",
-    "confirmation",
-    "shipped",
-    "tracking",
-    "delivery",
-    "invoice",
-    "purchase",
-    "shipment",
-  ];
-
-  // Keywords that suggest this is NOT a supplier order (e.g., customer orders)
-  const excludeKeywords = [
+  // EXCLUSION: Customer/seller order emails (we're the seller, not buyer)
+  const sellerKeywords = [
     "amazon seller central",
     "your sale",
     "customer order",
     "you sold",
     "buyer",
+    "seller account",
+    "payout",
+  ];
+  if (sellerKeywords.some((kw) => text.includes(kw))) {
+    return false;
+  }
+
+  // EXCLUSION: Review/feedback request emails
+  // Check subject first - these emails often reference order numbers so check before strong indicators
+  const reviewSubjectPatterns = [
+    /\breview\b/i,
+    /\bfeedback\b/i,
+    /\brate\s+(your|us|this|the)\b/i,
+    /how\s+(was|did|would you rate)/i,
+    /\btell us what you think\b/i,
+    /\byour opinion\b/i,
+    /\bwe'?d love (to hear|your)\b/i,
+    /\bshare your (experience|thoughts)\b/i,
+    /\bhow did we do\b/i,
+    /\bstar rating\b/i,
+  ];
+  if (reviewSubjectPatterns.some((pattern) => pattern.test(subjectLower))) {
+    return false;
+  }
+
+  // Also check body for strong review request indicators
+  const reviewBodyPatterns = [
+    /leave\s+a?\s*review/i,
+    /write\s+a?\s*review/i,
+    /rate\s+your\s+(order|purchase|experience)/i,
+    /how\s+was\s+your\s+(order|purchase|experience|delivery)/i,
+    /we'?d\s+love\s+your\s+feedback/i,
+    /share\s+your\s+feedback/i,
+    /tell\s+us\s+about\s+your\s+(order|experience)/i,
+    /your\s+feedback\s+(matters|helps|is important)/i,
+    /please\s+(rate|review)\s+(us|your|this)/i,
+    /\b\d\s*stars?\b.*\breview\b/i,
+    /click\s+to\s+rate/i,
+    /rate\s+now/i,
+    /review\s+now/i,
+  ];
+  if (reviewBodyPatterns.some((pattern) => pattern.test(text))) {
+    return false;
+  }
+
+  // POSITIVE: Strong indicators this is a real order email
+  // If these are present, accept even if there's promotional content in footer
+  const strongOrderPatterns = [
+    // Order confirmation patterns
+    /order\s*(?:#|number|no\.?|id)?[:\s]*[A-Z0-9][-A-Z0-9]{3,}/i,
+    /confirmation\s*(?:#|number|no\.?)?[:\s]*[A-Z0-9]/i,
+    /your order.*(?:has been|is|was)\s+(?:confirmed|placed|received|shipped)/i,
+    /(?:order|purchase)\s+confirmed/i,
+    /thank(?:s| you) for your (?:order|purchase)/i,
+    /we(?:'ve| have) received your order/i,
+    // Shipping/tracking patterns
+    /your (?:order|package|parcel|item).*(?:has |is )(?:shipped|dispatched|on its way)/i,
+    /tracking\s*(?:#|number|no\.?|id)?[:\s]*[A-Z0-9]{8,}/i,
+    /shipped.*tracking/i,
+    /dispatch(?:ed)? confirmation/i,
+    // Delivery patterns
+    /(?:estimated|expected) delivery/i,
+    /will (?:be delivered|arrive)/i,
+    /out for delivery/i,
+    /(?:has been|was) delivered/i,
+    /delivery confirmation/i,
+    // Invoice patterns
+    /invoice\s*(?:#|number|no\.?)?[:\s]*[A-Z0-9]/i,
+    /order invoice/i,
+    /payment received/i,
+    /payment confirmed/i,
   ];
 
-  const hasOrderKeyword = orderKeywords.some((kw) => text.includes(kw));
-  const hasExcludeKeyword = excludeKeywords.some((kw) => text.includes(kw));
+  const hasStrongOrderIndicator = strongOrderPatterns.some((pattern) => pattern.test(text));
 
-  return hasOrderKeyword && !hasExcludeKeyword;
+  // If we have a strong order indicator, it's likely a real order
+  if (hasStrongOrderIndicator) {
+    return true;
+  }
+
+  // No strong order indicators - check if SUBJECT is promotional
+  // (Body may have "unsubscribe" etc in footer, so only check subject)
+  const promotionalSubjectPatterns = [
+    /\b\d+%\s*off\b/i,
+    /\bsale\b/i,
+    /\bsave\s+\d+/i,
+    /\bsave\s+£/i,
+    /\bsave\s+\$/i,
+    /\bdiscount/i,
+    /\bfree delivery\b/i,
+    /\bfree shipping\b/i,
+    /\bspecial offer/i,
+    /\bdeal/i,
+    /\bclearance/i,
+    /\bnew arrivals?/i,
+    /\bflash sale/i,
+    /\blimited time/i,
+    /\bdon'?t miss/i,
+    /\blast chance/i,
+    /\bexclusive/i,
+    /\bbest sellers?/i,
+    /\brecommended/i,
+    /\bjust for you/i,
+    /\bwe miss you/i,
+    /\bcome back/i,
+  ];
+
+  const hasPromotionalSubject = promotionalSubjectPatterns.some((pattern) => pattern.test(subjectLower));
+
+  // If subject is promotional and no strong order indicators, reject
+  if (hasPromotionalSubject) {
+    return false;
+  }
+
+  // WEAK CHECK: Generic order keywords in subject
+  const orderSubjectKeywords = [
+    "order confirmed",
+    "order shipped",
+    "order dispatched",
+    "shipment",
+    "shipped",
+    "dispatched",
+    "tracking",
+    "delivered",
+    "invoice",
+    "receipt",
+  ];
+  const hasOrderSubjectKeyword = orderSubjectKeywords.some((kw) => subjectLower.includes(kw));
+
+  return hasOrderSubjectKeyword;
 }

@@ -1,4 +1,4 @@
-import { eq, desc, and, gte, lte, like, or, sql } from "drizzle-orm";
+import { eq, desc, and, gte, lte, like, or, sql, inArray } from "drizzle-orm";
 import { db } from "./db";
 import {
   users,
@@ -155,10 +155,27 @@ export class DatabaseStorage implements IStorage {
     return order;
   }
 
+  async getProcessedEmailIds(emailMessageIds: string[]): Promise<string[]> {
+    if (emailMessageIds.length === 0) return [];
+
+    const results = await db.select({ emailMessageId: supplierOrders.emailMessageId })
+      .from(supplierOrders)
+      .where(inArray(supplierOrders.emailMessageId, emailMessageIds));
+
+    return results
+      .map((r) => r.emailMessageId)
+      .filter((id): id is string => id !== null);
+  }
+
   async getSupplierOrderByOrderNumber(orderNumber: string): Promise<SupplierOrder | undefined> {
     const [order] = await db.select().from(supplierOrders)
       .where(eq(supplierOrders.orderNumber, orderNumber));
     return order;
+  }
+
+  async getOrdersByTrackingNumber(trackingNumber: string): Promise<SupplierOrder[]> {
+    return await db.select().from(supplierOrders)
+      .where(eq(supplierOrders.trackingNumber, trackingNumber.toUpperCase().trim()));
   }
 
   async findMatchingOrder(
@@ -258,6 +275,20 @@ export class DatabaseStorage implements IStorage {
       .where(eq(supplierOrders.id, id))
       .returning();
     return updated;
+  }
+
+  async deleteSupplierOrder(id: string): Promise<boolean> {
+    const result = await db.delete(supplierOrders)
+      .where(eq(supplierOrders.id, id));
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  async deleteAllSupplierOrders(): Promise<number> {
+    // Delete all order items first (foreign key constraint)
+    await db.delete(supplierOrderItems);
+    // Then delete all orders
+    const result = await db.delete(supplierOrders);
+    return result.rowCount ?? 0;
   }
 
   async getSupplierOrderStats(): Promise<SupplierOrderStats> {

@@ -2,23 +2,39 @@
 
 import { storage } from "./storage";
 import * as gmail from "./gmail";
-import { parseSupplierEmail, isSupplierOrderEmail } from "./emailParser";
+import { parseSupplierEmail, isSupplierOrderEmail, isCourierDomain, extractDomainFromEmail, COURIER_DOMAINS, extractTrackingNumber, detectEmailType, extractSupplierEmail } from "./emailParser";
 import { log } from "./log";
-import type { GmailAccount, InsertSupplierOrder, SupplierTrackingSettings } from "@shared/schema";
+import type { GmailAccount, InsertSupplierOrder, SupplierTrackingSettings, SupplierWhitelist } from "@shared/schema";
 
-// Sync interval in milliseconds (default: 5 minutes)
-const SYNC_INTERVAL_MS = parseInt(process.env.EMAIL_SYNC_INTERVAL_MS || "300000");
+// Sync interval in milliseconds (default: 15 minutes for deep per-supplier sync)
+const SYNC_INTERVAL_MS = parseInt(process.env.EMAIL_SYNC_INTERVAL_MS || "900000");
 
-// Gmail query for supplier-related emails
-const SUPPLIER_EMAIL_QUERY = [
-  "subject:(order OR confirmation OR shipped OR tracking OR delivery OR invoice)",
-  "newer_than:30d",
-].join(" ");
+// Maximum emails to fetch per supplier (each supplier gets this many)
+const MAX_EMAILS_PER_SUPPLIER = 100;
 
-// Maximum emails to process per sync
-const MAX_EMAILS_PER_SYNC = 200;
+// Days to look back for emails
+const SYNC_DAYS_BACK = 30;
+
+// Early termination: if this % of emails are already processed, skip rest
+const SKIP_THRESHOLD_PERCENT = 80;
+
+// Maximum new emails to process per supplier (prevents runaway on first sync)
+const MAX_NEW_EMAILS_PER_SUPPLIER = 50;
+
+// Delay between suppliers in ms (rate limiting)
+const SUPPLIER_DELAY_MS = 300;
 
 let syncIntervalId: NodeJS.Timeout | null = null;
+
+interface SupplierSyncResult {
+  supplierName: string;
+  supplierDomain: string;
+  emailsFound: number;
+  emailsProcessed: number;
+  ordersCreated: number;
+  ordersUpdated: number;
+  error?: string;
+}
 
 interface SyncResult {
   accountId: string;
@@ -27,6 +43,171 @@ interface SyncResult {
   ordersCreated: number;
   ordersUpdated: number;
   errors: string[];
+  supplierResults: SupplierSyncResult[];
+  suppliersScanned: number;
+  totalSuppliers: number;
+}
+
+// Track active sync progress for status reporting
+interface SyncProgress {
+  isRunning: boolean;
+  currentSupplier: string | null;
+  suppliersScanned: number;
+  totalSuppliers: number;
+  startedAt: Date | null;
+}
+
+let currentSyncProgress: SyncProgress = {
+  isRunning: false,
+  currentSupplier: null,
+  suppliersScanned: 0,
+  totalSuppliers: 0,
+  startedAt: null,
+};
+
+export function getSyncProgress(): SyncProgress {
+  return { ...currentSyncProgress };
+}
+
+// Courier sync configuration
+const MAX_COURIER_EMAILS = 100; // Max courier emails to scan per sync
+const COURIER_SYNC_ENABLED = true; // Enable/disable courier email processing
+
+interface CourierSyncResult {
+  courierName: string;
+  emailsScanned: number;
+  ordersUpdated: number;
+  trackingMatches: number;
+}
+
+/**
+ * Process courier emails to update existing orders with delivery status
+ * Scans emails from courier domains (Royal Mail, DPD, FedEx, etc.)
+ * and matches tracking numbers to existing supplier orders
+ */
+async function processCourierEmails(
+  account: GmailAccount,
+  accessToken: string,
+  settings: SupplierTrackingSettings
+): Promise<CourierSyncResult[]> {
+  const results: CourierSyncResult[] = [];
+
+  if (!COURIER_SYNC_ENABLED) {
+    return results;
+  }
+
+  log("Starting courier email scan for order updates", "email-sync");
+
+  // Build list of courier domains to scan
+  const courierDomains = Array.from(COURIER_DOMAINS).slice(0, 20); // Limit to top 20 couriers
+
+  for (const domain of courierDomains) {
+    const result: CourierSyncResult = {
+      courierName: domain,
+      emailsScanned: 0,
+      ordersUpdated: 0,
+      trackingMatches: 0,
+    };
+
+    try {
+      // Query for emails from this courier
+      const courierQuery = `from:@${domain} newer_than:${SYNC_DAYS_BACK}d`;
+      const emails = await gmail.getEmailList(accessToken, courierQuery, 50);
+
+      if (emails.length === 0) {
+        continue;
+      }
+
+      result.emailsScanned = emails.length;
+
+      // Process each courier email
+      for (const emailRef of emails) {
+        try {
+          // Fetch email content
+          const emailContent = await gmail.getEmailContent(accessToken, emailRef.id);
+
+          // Extract tracking number from courier email
+          const { tracking: trackingNumber, carrier } = extractTrackingNumber(emailContent.body);
+
+          if (!trackingNumber) {
+            continue;
+          }
+
+          // Find orders with this tracking number
+          const matchingOrders = await storage.getOrdersByTrackingNumber(trackingNumber);
+
+          if (matchingOrders.length === 0) {
+            continue;
+          }
+
+          result.trackingMatches++;
+
+          // Detect status from courier email
+          const newStatus = detectEmailType(emailContent.subject, emailContent.body);
+
+          // Update each matching order
+          for (const order of matchingOrders) {
+            const updates: Record<string, any> = {};
+
+            // Update status if it's a progression
+            const statusOrder = ["pending", "confirmed", "shipped", "in_transit", "delivered"];
+            const currentStatusIndex = statusOrder.indexOf(order.status);
+            const newStatusIndex = statusOrder.indexOf(newStatus);
+
+            if (newStatusIndex > currentStatusIndex) {
+              updates.status = newStatus;
+            }
+
+            // Update carrier if we detected one and order doesn't have one
+            if (carrier && !order.carrier) {
+              updates.carrier = carrier;
+            }
+
+            // If delivered, set actual delivery date
+            if (newStatus === "delivered" && !order.actualDeliveryDate) {
+              updates.actualDeliveryDate = emailContent.date;
+            }
+
+            // Only update if we have changes
+            if (Object.keys(updates).length > 0) {
+              // Re-check auto-flagging
+              const updatedOrder = { ...order, ...updates } as InsertSupplierOrder;
+              const { isFlagged, flagReason } = checkAutoFlag(updatedOrder, settings);
+              updates.isFlagged = isFlagged;
+              updates.flagReason = flagReason;
+
+              await storage.updateSupplierOrder(order.id, updates);
+              result.ordersUpdated++;
+
+              log(
+                `Courier update: ${domain} -> Order ${order.orderNumber || order.id} now ${newStatus}`,
+                "email-sync"
+              );
+            }
+          }
+        } catch (emailError) {
+          // Skip individual email errors
+        }
+      }
+
+      if (result.ordersUpdated > 0) {
+        results.push(result);
+        log(`${domain}: ${result.trackingMatches} tracking matches, ${result.ordersUpdated} orders updated`, "email-sync");
+      }
+    } catch (error) {
+      // Skip courier domain errors
+    }
+
+    // Small delay between courier domains
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+
+  const totalUpdates = results.reduce((sum, r) => sum + r.ordersUpdated, 0);
+  if (totalUpdates > 0) {
+    log(`Courier scan complete: ${totalUpdates} orders updated from courier emails`, "email-sync");
+  }
+
+  return results;
 }
 
 /**
@@ -128,63 +309,77 @@ function checkAutoFlag(
 }
 
 /**
- * Sync emails for a single Gmail account
+ * Process emails for a single supplier - optimized for large supplier lists
  */
-export async function syncAccount(accountId: string): Promise<SyncResult> {
-  const account = await storage.getGmailAccount(accountId);
-
-  if (!account) {
-    throw new Error(`Account ${accountId} not found`);
-  }
-
-  if (!account.syncEnabled) {
-    return {
-      accountId,
-      email: account.email,
-      emailsProcessed: 0,
-      ordersCreated: 0,
-      ordersUpdated: 0,
-      errors: ["Sync disabled for this account"],
-    };
-  }
-
-  const result: SyncResult = {
-    accountId,
-    email: account.email,
+async function syncSupplier(
+  account: GmailAccount,
+  accessToken: string,
+  supplier: SupplierWhitelist,
+  settings: SupplierTrackingSettings
+): Promise<SupplierSyncResult> {
+  const result: SupplierSyncResult = {
+    supplierName: supplier.name,
+    supplierDomain: supplier.domain || "",
+    emailsFound: 0,
     emailsProcessed: 0,
     ordersCreated: 0,
     ordersUpdated: 0,
-    errors: [],
   };
 
-  // Create sync log
-  const syncLog = await storage.createEmailSyncLog({
-    gmailAccountId: accountId,
-    syncType: "manual",
-    status: "running",
-  });
+  // Skip courier domains - they are NOT suppliers
+  // Courier emails (Royal Mail, DPD, etc.) should not create orders
+  if (supplier.domain && isCourierDomain(`test@${supplier.domain}`)) {
+    result.error = "Skipped: courier/carrier domain, not a supplier";
+    log(`Skipping ${supplier.name}: courier domain, not a supplier`, "email-sync");
+    return result;
+  }
 
   try {
-    // Get valid access token
-    const accessToken = await getValidAccessToken(account);
+    // Build query for this specific supplier's domain
+    const supplierQuery = [
+      `from:${supplier.emailPattern}`,
+      `newer_than:${SYNC_DAYS_BACK}d`,
+    ].join(" ");
 
-    // Get auto-flag settings
-    const settings = await storage.getSupplierTrackingSettings();
+    log(`Scanning supplier: ${supplier.name} (${supplier.emailPattern})`, "email-sync");
 
-    // Fetch emails
-    log(`Fetching emails for ${account.email}`, "email-sync");
-    const emails = await gmail.getEmailList(accessToken, SUPPLIER_EMAIL_QUERY, MAX_EMAILS_PER_SYNC);
+    // Step 1: Fetch email list (just IDs - very fast)
+    const emails = await gmail.getEmailList(accessToken, supplierQuery, MAX_EMAILS_PER_SUPPLIER);
+    result.emailsFound = emails.length;
 
-    log(`Found ${emails.length} emails to process`, "email-sync");
+    if (emails.length === 0) {
+      return result;
+    }
 
-    for (const emailRef of emails) {
+    // Step 2: Batch check which emails are already processed (single DB query)
+    const emailIds = emails.map((e) => e.id);
+    const processedIds = await storage.getProcessedEmailIds(emailIds);
+    const processedSet = new Set(processedIds);
+
+    // Filter to only unprocessed emails
+    const unprocessedEmails = emails.filter((e) => !processedSet.has(e.id));
+    const alreadyProcessedCount = emails.length - unprocessedEmails.length;
+
+    // Early termination: if most emails already processed, skip this supplier
+    const processedPercent = (alreadyProcessedCount / emails.length) * 100;
+    if (processedPercent >= SKIP_THRESHOLD_PERCENT && unprocessedEmails.length === 0) {
+      log(`${supplier.name}: ${alreadyProcessedCount}/${emails.length} already processed, skipping`, "email-sync");
+      return result;
+    }
+
+    // Limit new emails to process per supplier
+    const emailsToProcess = unprocessedEmails.slice(0, MAX_NEW_EMAILS_PER_SUPPLIER);
+
+    if (emailsToProcess.length === 0) {
+      log(`${supplier.name}: no new emails to process`, "email-sync");
+      return result;
+    }
+
+    log(`${supplier.name}: processing ${emailsToProcess.length} new emails (${alreadyProcessedCount} already done)`, "email-sync");
+
+    // Step 3: Process unprocessed emails
+    for (const emailRef of emailsToProcess) {
       try {
-        // Skip if we already processed this exact email
-        const alreadyProcessed = await storage.getSupplierOrderByEmailId(emailRef.id);
-        if (alreadyProcessed) {
-          continue;
-        }
-
         // Fetch full email content
         const emailContent = await gmail.getEmailContent(accessToken, emailRef.id);
         result.emailsProcessed++;
@@ -197,13 +392,9 @@ export async function syncAccount(accountId: string): Promise<SyncResult> {
         // Parse the email
         const parsed = parseSupplierEmail(emailContent);
 
-        // Check if sender is whitelisted (if whitelist is configured)
-        if (parsed.supplierEmail) {
-          const isWhitelisted = await storage.isEmailWhitelisted(parsed.supplierEmail);
-          if (!isWhitelisted) {
-            log(`Skipping non-whitelisted sender: ${parsed.supplierEmail}`, "email-sync");
-            continue;
-          }
+        // Override supplier info with whitelist data for consistency
+        if (!parsed.supplierName || parsed.supplierName === "Unknown") {
+          parsed.supplierName = supplier.name;
         }
 
         // Try to find an existing order to update
@@ -259,14 +450,13 @@ export async function syncAccount(accountId: string): Promise<SyncResult> {
 
             await storage.updateSupplierOrder(existingOrder.id, updates);
             result.ordersUpdated++;
-            log(`Updated order ${existingOrder.orderNumber || existingOrder.id} from email: ${emailContent.subject}`, "email-sync");
           }
         } else {
           // Create new order
           const orderData: InsertSupplierOrder = {
-            gmailAccountId: accountId,
+            gmailAccountId: account.id,
             emailMessageId: emailRef.id,
-            supplierName: parsed.supplierName,
+            supplierName: parsed.supplierName || supplier.name,
             supplierEmail: parsed.supplierEmail,
             orderNumber: parsed.orderNumber,
             orderDate: parsed.orderDate,
@@ -282,7 +472,7 @@ export async function syncAccount(accountId: string): Promise<SyncResult> {
               from: emailContent.from,
               to: emailContent.to,
               date: emailContent.date,
-              body: emailContent.body.substring(0, 5000), // Limit stored body size
+              body: emailContent.body.substring(0, 5000),
             }),
           };
 
@@ -293,30 +483,151 @@ export async function syncAccount(accountId: string): Promise<SyncResult> {
 
           await storage.createSupplierOrder(orderData);
           result.ordersCreated++;
-
-          log(`Created order from email: ${emailContent.subject}`, "email-sync");
         }
       } catch (emailError) {
         const errorMsg = emailError instanceof Error ? emailError.message : String(emailError);
-        result.errors.push(`Email ${emailRef.id}: ${errorMsg}`);
-        log(`Error processing email ${emailRef.id}: ${errorMsg}`, "email-sync");
+        log(`Error processing email from ${supplier.name}: ${errorMsg}`, "email-sync");
       }
     }
+
+    if (result.ordersCreated > 0 || result.ordersUpdated > 0) {
+      log(`${supplier.name}: +${result.ordersCreated} created, ${result.ordersUpdated} updated`, "email-sync");
+    }
+  } catch (error) {
+    result.error = error instanceof Error ? error.message : String(error);
+    log(`Error scanning ${supplier.name}: ${result.error}`, "email-sync");
+  }
+
+  return result;
+}
+
+/**
+ * Sync emails for a single Gmail account - systematically scans each whitelisted supplier
+ */
+export async function syncAccount(accountId: string): Promise<SyncResult> {
+  const account = await storage.getGmailAccount(accountId);
+
+  if (!account) {
+    throw new Error(`Account ${accountId} not found`);
+  }
+
+  // Get all active whitelisted suppliers
+  const allSuppliers = await storage.getAllSupplierWhitelist();
+  const activeSuppliers = allSuppliers.filter((s) => s.isActive);
+
+  if (!account.syncEnabled) {
+    return {
+      accountId,
+      email: account.email,
+      emailsProcessed: 0,
+      ordersCreated: 0,
+      ordersUpdated: 0,
+      errors: ["Sync disabled for this account"],
+      supplierResults: [],
+      suppliersScanned: 0,
+      totalSuppliers: activeSuppliers.length,
+    };
+  }
+
+  const result: SyncResult = {
+    accountId,
+    email: account.email,
+    emailsProcessed: 0,
+    ordersCreated: 0,
+    ordersUpdated: 0,
+    errors: [],
+    supplierResults: [],
+    suppliersScanned: 0,
+    totalSuppliers: activeSuppliers.length,
+  };
+
+  if (activeSuppliers.length === 0) {
+    result.errors.push("No active suppliers in whitelist. Add suppliers to start tracking orders.");
+    return result;
+  }
+
+  // Create sync log
+  const syncLog = await storage.createEmailSyncLog({
+    gmailAccountId: accountId,
+    syncType: "manual",
+    status: "running",
+  });
+
+  // Update global progress
+  currentSyncProgress = {
+    isRunning: true,
+    currentSupplier: null,
+    suppliersScanned: 0,
+    totalSuppliers: activeSuppliers.length,
+    startedAt: new Date(),
+  };
+
+  try {
+    // Get valid access token
+    const accessToken = await getValidAccessToken(account);
+
+    // Get auto-flag settings
+    const settings = await storage.getSupplierTrackingSettings();
+
+    log(`Starting per-supplier sync for ${account.email} (${activeSuppliers.length} suppliers)`, "email-sync");
+
+    // Process each supplier systematically
+    for (let i = 0; i < activeSuppliers.length; i++) {
+      const supplier = activeSuppliers[i];
+
+      // Update progress
+      currentSyncProgress.currentSupplier = supplier.name;
+      currentSyncProgress.suppliersScanned = i;
+
+      // Sync this supplier
+      const supplierResult = await syncSupplier(account, accessToken, supplier, settings);
+      result.supplierResults.push(supplierResult);
+
+      // Aggregate totals
+      result.emailsProcessed += supplierResult.emailsProcessed;
+      result.ordersCreated += supplierResult.ordersCreated;
+      result.ordersUpdated += supplierResult.ordersUpdated;
+      if (supplierResult.error) {
+        result.errors.push(`${supplier.name}: ${supplierResult.error}`);
+      }
+
+      result.suppliersScanned = i + 1;
+
+      // Small delay between suppliers to avoid rate limits
+      if (i < activeSuppliers.length - 1) {
+        await new Promise((resolve) => setTimeout(resolve, SUPPLIER_DELAY_MS));
+      }
+    }
+
+    // Process courier emails to update existing orders with delivery status
+    currentSyncProgress.currentSupplier = "Scanning courier emails...";
+    const courierResults = await processCourierEmails(account, accessToken, settings);
+    const courierUpdates = courierResults.reduce((sum, r) => sum + r.ordersUpdated, 0);
+    result.ordersUpdated += courierUpdates;
 
     // Update last sync time
     await storage.updateGmailAccount(accountId, { lastSyncAt: new Date() });
 
-    // Update sync log
+    // Build detailed log message
+    const supplierSummary = result.supplierResults
+      .filter((s) => s.ordersCreated > 0 || s.ordersUpdated > 0)
+      .map((s) => `${s.supplierName}: +${s.ordersCreated}/${s.ordersUpdated}u`)
+      .join(", ");
+
+    const courierSummary = courierUpdates > 0 ? ` | Courier updates: ${courierUpdates}` : "";
+
+    // Update sync log with per-supplier details
     await storage.updateEmailSyncLog(syncLog.id, {
       status: "completed",
       emailsProcessed: result.emailsProcessed,
       ordersCreated: result.ordersCreated,
       ordersUpdated: result.ordersUpdated,
       completedAt: new Date(),
+      errorMessage: (supplierSummary + courierSummary) || undefined,
     });
 
     log(
-      `Sync completed for ${account.email}: ${result.emailsProcessed} emails, ${result.ordersCreated} orders created`,
+      `Sync completed for ${account.email}: ${result.suppliersScanned} suppliers, ${result.emailsProcessed} emails, ${result.ordersCreated} orders created, ${result.ordersUpdated} updated${courierSummary}`,
       "email-sync"
     );
   } catch (error) {
@@ -330,6 +641,15 @@ export async function syncAccount(accountId: string): Promise<SyncResult> {
     });
 
     log(`Sync failed for ${account.email}: ${errorMsg}`, "email-sync");
+  } finally {
+    // Clear progress
+    currentSyncProgress = {
+      isRunning: false,
+      currentSupplier: null,
+      suppliersScanned: result.suppliersScanned,
+      totalSuppliers: result.totalSuppliers,
+      startedAt: null,
+    };
   }
 
   return result;
@@ -359,6 +679,9 @@ export async function syncAllAccounts(): Promise<SyncResult[]> {
         ordersCreated: 0,
         ordersUpdated: 0,
         errors: [errorMsg],
+        supplierResults: [],
+        suppliersScanned: 0,
+        totalSuppliers: 0,
       });
     }
 

@@ -16,6 +16,9 @@ import {
   ArrowUpDown,
   ArrowUp,
   ArrowDown,
+  Mail,
+  Trash2,
+  RotateCcw,
 } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -37,10 +40,21 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 
 interface SupplierOrder {
   id: string;
   gmailAccountId: string;
+  gmailAccountEmail: string | null;
   emailMessageId: string;
   supplierName: string | null;
   supplierEmail: string | null;
@@ -95,11 +109,12 @@ type SortDirection = "asc" | "desc";
 
 interface InboundOrdersCardProps {
   onViewOrder?: (order: SupplierOrder) => void;
+  onOrderDeleted?: () => void;
 }
 
 const PAGE_SIZE = 25;
 
-export default function InboundOrdersCard({ onViewOrder }: InboundOrdersCardProps) {
+export default function InboundOrdersCard({ onViewOrder, onOrderDeleted }: InboundOrdersCardProps) {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<OrdersResponse | null>(null);
   const [dateRange, setDateRange] = useState<DateRange>("30days");
@@ -109,6 +124,10 @@ export default function InboundOrdersCard({ onViewOrder }: InboundOrdersCardProp
   const [currentPage, setCurrentPage] = useState(1);
   const [sortField, setSortField] = useState<SortField>("orderDate");
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
+  const [orderToDelete, setOrderToDelete] = useState<SupplierOrder | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [showClearConfirm, setShowClearConfirm] = useState(false);
+  const [clearing, setClearing] = useState(false);
 
   const getDateRangeParams = (range: DateRange) => {
     if (range === "all") return {};
@@ -189,6 +208,48 @@ export default function InboundOrdersCard({ onViewOrder }: InboundOrdersCardProp
       }
     } catch (error) {
       console.error("Failed to toggle flag:", error);
+    }
+  };
+
+  const handleDeleteOrder = async () => {
+    if (!orderToDelete) return;
+
+    setDeleting(true);
+    try {
+      const response = await fetch(`/api/supplier-orders/${orderToDelete.id}`, {
+        method: "DELETE",
+      });
+
+      if (response.ok) {
+        fetchOrders();
+        onOrderDeleted?.();
+      }
+    } catch (error) {
+      console.error("Failed to delete order:", error);
+    } finally {
+      setDeleting(false);
+      setOrderToDelete(null);
+    }
+  };
+
+  const handleClearAllOrders = async () => {
+    setClearing(true);
+    try {
+      const response = await fetch("/api/supplier-orders", {
+        method: "DELETE",
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        console.log(`Cleared ${data.data?.deletedCount || 0} orders`);
+        fetchOrders();
+        onOrderDeleted?.();
+      }
+    } catch (error) {
+      console.error("Failed to clear orders:", error);
+    } finally {
+      setClearing(false);
+      setShowClearConfirm(false);
     }
   };
 
@@ -298,15 +359,27 @@ export default function InboundOrdersCard({ onViewOrder }: InboundOrdersCardProp
             <Truck className="h-5 w-5 text-primary" />
             <CardTitle className="text-lg">Supplier Orders</CardTitle>
           </div>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={fetchOrders}
-            disabled={loading}
-          >
-            <RefreshCw className={`h-4 w-4 mr-1 ${loading ? "animate-spin" : ""}`} />
-            Refresh
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setShowClearConfirm(true)}
+              disabled={loading || clearing}
+              className="text-muted-foreground hover:text-destructive"
+            >
+              <RotateCcw className="h-4 w-4 mr-1" />
+              Clear All
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={fetchOrders}
+              disabled={loading}
+            >
+              <RefreshCw className={`h-4 w-4 mr-1 ${loading ? "animate-spin" : ""}`} />
+              Refresh
+            </Button>
+          </div>
         </div>
         <CardDescription>
           Track inbound orders from your suppliers
@@ -573,13 +646,44 @@ export default function InboundOrdersCard({ onViewOrder }: InboundOrdersCardProp
                         )}
                       </TableCell>
                       <TableCell>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => onViewOrder?.(order)}
-                        >
-                          <Eye className="h-4 w-4" />
-                        </Button>
+                        <div className="flex items-center gap-1">
+                          {order.emailMessageId && (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              asChild
+                              title="View source email in Gmail"
+                            >
+                              <a
+                                href={order.gmailAccountEmail
+                                  ? `https://mail.google.com/mail/u/?authuser=${encodeURIComponent(order.gmailAccountEmail)}#inbox/${order.emailMessageId}`
+                                  : `https://mail.google.com/mail/u/0/#inbox/${order.emailMessageId}`
+                                }
+                                target="_blank"
+                                rel="noopener noreferrer"
+                              >
+                                <Mail className="h-4 w-4" />
+                              </a>
+                            </Button>
+                          )}
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => onViewOrder?.(order)}
+                            title="View order details"
+                          >
+                            <Eye className="h-4 w-4" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => setOrderToDelete(order)}
+                            title="Delete order"
+                            className="text-muted-foreground hover:text-destructive"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        </div>
                       </TableCell>
                     </TableRow>
                   );
@@ -641,6 +745,53 @@ export default function InboundOrdersCard({ onViewOrder }: InboundOrdersCardProp
             Showing {orders.length} order{orders.length !== 1 ? "s" : ""}
           </p>
         )}
+
+        {/* Delete Confirmation Dialog */}
+        <AlertDialog open={!!orderToDelete} onOpenChange={(open) => !open && setOrderToDelete(null)}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Delete Order</AlertDialogTitle>
+              <AlertDialogDescription>
+                Are you sure you want to delete this order from {orderToDelete?.supplierName || "Unknown"}?
+                {orderToDelete?.orderNumber && ` (Order #${orderToDelete.orderNumber})`}
+                {" "}This action cannot be undone.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel disabled={deleting}>Cancel</AlertDialogCancel>
+              <AlertDialogAction
+                onClick={handleDeleteOrder}
+                disabled={deleting}
+                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              >
+                {deleting ? "Deleting..." : "Delete"}
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+
+        {/* Clear All Confirmation Dialog */}
+        <AlertDialog open={showClearConfirm} onOpenChange={setShowClearConfirm}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Clear All Orders</AlertDialogTitle>
+              <AlertDialogDescription>
+                Are you sure you want to delete ALL supplier orders? This will remove {summary?.total || 0} orders.
+                This is intended for development/testing purposes. This action cannot be undone.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel disabled={clearing}>Cancel</AlertDialogCancel>
+              <AlertDialogAction
+                onClick={handleClearAllOrders}
+                disabled={clearing}
+                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              >
+                {clearing ? "Clearing..." : "Clear All Orders"}
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </CardContent>
     </Card>
   );

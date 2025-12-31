@@ -81,10 +81,14 @@ export interface IStorage {
   createSupplierOrder(order: InsertSupplierOrder): Promise<SupplierOrder>;
   getSupplierOrder(id: string): Promise<SupplierOrder | undefined>;
   getSupplierOrderByEmailId(emailMessageId: string): Promise<SupplierOrder | undefined>;
+  getProcessedEmailIds(emailMessageIds: string[]): Promise<string[]>;
   getSupplierOrderByOrderNumber(orderNumber: string): Promise<SupplierOrder | undefined>;
+  getOrdersByTrackingNumber(trackingNumber: string): Promise<SupplierOrder[]>;
   findMatchingOrder(supplierEmail: string | null, orderNumber: string | null, trackingNumber: string | null): Promise<SupplierOrder | undefined>;
   getSupplierOrders(filters: SupplierOrderFilters): Promise<{ orders: SupplierOrder[]; total: number }>;
   updateSupplierOrder(id: string, data: Partial<SupplierOrder>): Promise<SupplierOrder | undefined>;
+  deleteSupplierOrder(id: string): Promise<boolean>;
+  deleteAllSupplierOrders(): Promise<number>;
   getSupplierOrderStats(): Promise<SupplierOrderStats>;
 
   // Supplier Order Item methods
@@ -360,9 +364,27 @@ export class MemStorage implements IStorage {
     );
   }
 
+  async getProcessedEmailIds(emailMessageIds: string[]): Promise<string[]> {
+    const processedIds: string[] = [];
+    const orders = Array.from(this.supplierOrders.values());
+    for (const id of emailMessageIds) {
+      if (orders.some((order) => order.emailMessageId === id)) {
+        processedIds.push(id);
+      }
+    }
+    return processedIds;
+  }
+
   async getSupplierOrderByOrderNumber(orderNumber: string): Promise<SupplierOrder | undefined> {
     return Array.from(this.supplierOrders.values()).find(
       (order) => order.orderNumber === orderNumber
+    );
+  }
+
+  async getOrdersByTrackingNumber(trackingNumber: string): Promise<SupplierOrder[]> {
+    const normalizedTracking = trackingNumber.toUpperCase().trim();
+    return Array.from(this.supplierOrders.values()).filter(
+      (order) => order.trackingNumber?.toUpperCase().trim() === normalizedTracking
     );
   }
 
@@ -469,6 +491,17 @@ export class MemStorage implements IStorage {
     };
     this.supplierOrders.set(id, updated);
     return updated;
+  }
+
+  async deleteSupplierOrder(id: string): Promise<boolean> {
+    return this.supplierOrders.delete(id);
+  }
+
+  async deleteAllSupplierOrders(): Promise<number> {
+    const count = this.supplierOrders.size;
+    this.supplierOrders.clear();
+    this.supplierOrderItems.clear();
+    return count;
   }
 
   async getSupplierOrderStats(): Promise<SupplierOrderStats> {

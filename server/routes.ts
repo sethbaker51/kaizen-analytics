@@ -5,7 +5,7 @@ import { log } from "./log";
 import { csvSkuRowSchema, csvSupplierWhitelistRowSchema, type InsertSkuItem } from "@shared/schema";
 import * as gmail from "./gmail";
 import * as emailSync from "./emailSync";
-import { isSupplierOrderEmail, extractSupplierName, extractSupplierEmail } from "./emailParser";
+import { isSupplierOrderEmail, extractSupplierName, extractSupplierEmail, COURIER_DOMAINS, isCourierDomain } from "./emailParser";
 
 // SP-API configuration
 const LWA_TOKEN_ENDPOINT = "https://api.amazon.com/auth/o2/token";
@@ -1687,7 +1687,9 @@ MY-SKU-002,B07XJ8C8F5,29.99,50,new,true,true,Not Applicable`;
       }>();
 
       // Domains to skip - personal email, marketing, social, etc.
+      // Start with courier domains - these are NEVER suppliers
       const skipDomains = new Set([
+        ...Array.from(COURIER_DOMAINS),
         // Personal email providers
         "gmail.com", "yahoo.com", "hotmail.com", "outlook.com", "live.com",
         "icloud.com", "aol.com", "protonmail.com", "msn.com", "me.com",
@@ -1964,15 +1966,25 @@ MY-SKU-002,B07XJ8C8F5,29.99,50,new,true,true,Not Applicable`;
         offset: offset ? parseInt(offset as string) : 0,
       };
 
-      const [ordersResult, stats] = await Promise.all([
+      const [ordersResult, stats, gmailAccounts] = await Promise.all([
         storage.getSupplierOrders(filters),
         storage.getSupplierOrderStats(),
+        storage.getAllGmailAccounts(),
       ]);
+
+      // Create a lookup map for Gmail account emails
+      const gmailEmailMap = new Map(gmailAccounts.map(a => [a.id, a.email]));
+
+      // Add Gmail account email to each order for proper email linking
+      const ordersWithEmail = ordersResult.orders.map(order => ({
+        ...order,
+        gmailAccountEmail: gmailEmailMap.get(order.gmailAccountId) || null,
+      }));
 
       res.json({
         success: true,
         summary: stats,
-        data: ordersResult.orders,
+        data: ordersWithEmail,
         pagination: {
           total: ordersResult.total,
           limit: filters.limit ?? 100,
@@ -2111,6 +2123,57 @@ MY-SKU-002,B07XJ8C8F5,29.99,50,new,true,true,Not Applicable`;
     }
   });
 
+  // Supplier Orders: Delete ALL orders (for development/testing)
+  app.delete("/api/supplier-orders", async (req, res) => {
+    try {
+      const count = await storage.deleteAllSupplierOrders();
+      log(`Deleted all supplier orders (${count} orders removed)`, "supplier-orders");
+
+      res.json({
+        success: true,
+        data: { deletedCount: count },
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      res.status(500).json({
+        success: false,
+        error: errorMessage,
+      });
+    }
+  });
+
+  // Supplier Orders: Delete order
+  app.delete("/api/supplier-orders/:id", async (req, res) => {
+    try {
+      const { id } = req.params;
+
+      const order = await storage.getSupplierOrder(id);
+      if (!order) {
+        return res.status(404).json({
+          success: false,
+          error: "Order not found",
+        });
+      }
+
+      const deleted = await storage.deleteSupplierOrder(id);
+
+      if (deleted) {
+        log(`Deleted supplier order: ${order.orderNumber || id} from ${order.supplierName}`, "supplier-orders");
+      }
+
+      res.json({
+        success: true,
+        data: { deleted },
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      res.status(500).json({
+        success: false,
+        error: errorMessage,
+      });
+    }
+  });
+
   // Sync logs: Get recent sync logs
   app.get("/api/gmail/sync-logs", async (req, res) => {
     try {
@@ -2120,6 +2183,23 @@ MY-SKU-002,B07XJ8C8F5,29.99,50,new,true,true,Not Applicable`;
       res.json({
         success: true,
         data: logs,
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      res.status(500).json({
+        success: false,
+        error: errorMessage,
+      });
+    }
+  });
+
+  // Sync progress: Get current sync progress (for real-time status)
+  app.get("/api/gmail/sync-progress", async (_req, res) => {
+    try {
+      const progress = emailSync.getSyncProgress();
+      res.json({
+        success: true,
+        data: progress,
       });
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
@@ -2223,6 +2303,17 @@ MY-SKU-002,B07XJ8C8F5,29.99,50,new,true,true,Not Applicable`;
         return res.status(400).json({
           success: false,
           error: "Name and email pattern are required",
+        });
+      }
+
+      // Check if the domain is a courier - warn the user
+      const testEmail = emailPattern.startsWith("@")
+        ? `test${emailPattern}`
+        : emailPattern;
+      if (isCourierDomain(testEmail)) {
+        return res.status(400).json({
+          success: false,
+          error: `"${name}" appears to be a courier/carrier (e.g., Royal Mail, DPD, FedEx), not a supplier. Couriers deliver packages but don't sell products. Emails from couriers will not create orders.`,
         });
       }
 

@@ -46,6 +46,8 @@ interface SyncResult {
   ordersCreated: number;
   ordersUpdated: number;
   errors: string[];
+  suppliersScanned: number;
+  totalSuppliers: number;
 }
 
 export default function GmailAccountsCard() {
@@ -192,21 +194,27 @@ export default function GmailAccountsCard() {
         await fetchAccounts();
 
         const result = data.data as SyncResult;
+        const supplierInfo = result.totalSuppliers > 0
+          ? `Scanned ${result.suppliersScanned} suppliers. `
+          : "";
+
         if (result.errors.length > 0) {
           toast({
             title: "Sync completed with errors",
-            description: `Processed ${result.emailsProcessed} emails, ${result.ordersCreated} new orders. ${result.errors.length} error(s) occurred.`,
+            description: `${supplierInfo}${result.ordersCreated} new orders, ${result.ordersUpdated} updated. ${result.errors.length} error(s).`,
             variant: "destructive",
           });
         } else if (result.ordersCreated > 0 || result.ordersUpdated > 0) {
           toast({
             title: "Sync completed",
-            description: `Processed ${result.emailsProcessed} emails. Created ${result.ordersCreated} new orders, updated ${result.ordersUpdated}.`,
+            description: `${supplierInfo}Found ${result.ordersCreated} new orders, updated ${result.ordersUpdated}.`,
           });
         } else {
           toast({
             title: "Sync completed",
-            description: `Processed ${result.emailsProcessed} emails. No new orders found.`,
+            description: result.totalSuppliers > 0
+              ? `Scanned ${result.suppliersScanned} suppliers. No new orders found.`
+              : "No new orders found. Add suppliers to the whitelist to start tracking.",
           });
         }
       } else {

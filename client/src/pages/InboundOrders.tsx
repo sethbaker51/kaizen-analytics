@@ -38,6 +38,10 @@ export default function InboundOrders() {
     setRefreshKey((prev) => prev + 1);
   };
 
+  const handleOrderDeleted = () => {
+    setRefreshKey((prev) => prev + 1);
+  };
+
   return (
     <div className="space-y-8">
       <div>
@@ -53,6 +57,7 @@ export default function InboundOrders() {
         order={selectedOrder}
         onClose={() => setSelectedOrder(null)}
         onSave={handleOrderSaved}
+        onDelete={handleOrderDeleted}
       />
     </div>
   );
