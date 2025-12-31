@@ -5,6 +5,7 @@ import { log } from "./log";
 import { csvSkuRowSchema, csvSupplierWhitelistRowSchema, type InsertSkuItem } from "@shared/schema";
 import * as gmail from "./gmail";
 import * as emailSync from "./emailSync";
+import { isSupplierOrderEmail, extractSupplierName, extractSupplierEmail } from "./emailParser";
 
 // SP-API configuration
 const LWA_TOKEN_ENDPOINT = "https://api.amazon.com/auth/o2/token";
@@ -1653,6 +1654,208 @@ MY-SKU-002,B07XJ8C8F5,29.99,50,new,true,true,Not Applicable`;
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       log(`Sync account failed: ${errorMessage}`, "gmail");
+      res.status(500).json({
+        success: false,
+        error: errorMessage,
+      });
+    }
+  });
+
+  // Gmail: Discover potential suppliers from inbox
+  app.post("/api/gmail/discover-suppliers", async (req, res) => {
+    try {
+      const accounts = await storage.getAllGmailAccounts();
+      const enabledAccounts = accounts.filter((a) => a.syncEnabled);
+
+      if (enabledAccounts.length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: "No Gmail accounts connected. Please connect a Gmail account first.",
+        });
+      }
+
+      log("Starting supplier discovery scan", "gmail");
+
+      // Track unique suppliers by domain
+      const supplierMap = new Map<string, {
+        name: string;
+        emailPattern: string;
+        domain: string;
+        emailCount: number;
+        sampleSubjects: string[];
+        sampleEmails: string[];
+      }>();
+
+      // Query for potential supplier emails - broader search for discovery
+      const discoveryQuery = [
+        "subject:(order OR confirmation OR shipped OR tracking OR delivery OR invoice OR receipt OR purchase)",
+        "newer_than:60d",
+      ].join(" ");
+
+      for (const account of enabledAccounts) {
+        try {
+          // Refresh token if needed
+          const expiryBuffer = 5 * 60 * 1000;
+          let accessToken = account.accessToken;
+
+          if (new Date() > new Date(account.tokenExpiry.getTime() - expiryBuffer)) {
+            const tokens = await gmail.refreshAccessToken(account.refreshToken);
+            await storage.updateGmailAccount(account.id, {
+              accessToken: tokens.accessToken,
+              tokenExpiry: tokens.tokenExpiry,
+            });
+            accessToken = tokens.accessToken;
+          }
+
+          // Fetch emails - get more for discovery
+          const emails = await gmail.getEmailList(accessToken, discoveryQuery, 500);
+          log(`Found ${emails.length} potential supplier emails for discovery`, "gmail");
+
+          // Process each email
+          for (const emailRef of emails) {
+            try {
+              const emailContent = await gmail.getEmailContent(accessToken, emailRef.id);
+
+              // Check if this looks like a supplier order email
+              if (!isSupplierOrderEmail(emailContent.subject, emailContent.body)) {
+                continue;
+              }
+
+              // Extract supplier info
+              const supplierEmail = extractSupplierEmail(emailContent.from);
+              const supplierName = extractSupplierName(emailContent.from);
+
+              if (!supplierEmail) continue;
+
+              // Extract domain
+              const atIndex = supplierEmail.indexOf("@");
+              if (atIndex === -1) continue;
+              const domain = supplierEmail.substring(atIndex + 1).toLowerCase();
+
+              // Skip common non-supplier domains
+              const skipDomains = [
+                "gmail.com", "yahoo.com", "hotmail.com", "outlook.com",
+                "icloud.com", "aol.com", "protonmail.com", "live.com",
+              ];
+              if (skipDomains.includes(domain)) continue;
+
+              // Update or create supplier entry
+              const existing = supplierMap.get(domain);
+              if (existing) {
+                existing.emailCount++;
+                if (existing.sampleSubjects.length < 3 && !existing.sampleSubjects.includes(emailContent.subject)) {
+                  existing.sampleSubjects.push(emailContent.subject);
+                }
+                if (!existing.sampleEmails.includes(supplierEmail)) {
+                  existing.sampleEmails.push(supplierEmail);
+                }
+                // Use the most common name
+                if (!existing.name && supplierName) {
+                  existing.name = supplierName;
+                }
+              } else {
+                supplierMap.set(domain, {
+                  name: supplierName || domain.split(".")[0],
+                  emailPattern: `@${domain}`,
+                  domain,
+                  emailCount: 1,
+                  sampleSubjects: [emailContent.subject],
+                  sampleEmails: [supplierEmail],
+                });
+              }
+            } catch (emailError) {
+              // Skip individual email errors
+              continue;
+            }
+          }
+        } catch (accountError) {
+          log(`Error scanning account ${account.email}: ${accountError}`, "gmail");
+        }
+      }
+
+      // Get existing whitelist to mark already-added suppliers
+      const existingWhitelist = await storage.getAllSupplierWhitelist();
+      const existingDomains = new Set(existingWhitelist.map((e) => e.domain?.toLowerCase()).filter(Boolean));
+
+      // Convert to array and sort by email count
+      const suggestions = Array.from(supplierMap.values())
+        .map((s) => ({
+          ...s,
+          alreadyWhitelisted: existingDomains.has(s.domain),
+        }))
+        .sort((a, b) => b.emailCount - a.emailCount);
+
+      log(`Discovered ${suggestions.length} potential suppliers`, "gmail");
+
+      res.json({
+        success: true,
+        data: {
+          suppliers: suggestions,
+          totalFound: suggestions.length,
+          alreadyWhitelisted: suggestions.filter((s) => s.alreadyWhitelisted).length,
+        },
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      log(`Supplier discovery failed: ${errorMessage}`, "gmail");
+      res.status(500).json({
+        success: false,
+        error: errorMessage,
+      });
+    }
+  });
+
+  // Gmail: Bulk add discovered suppliers to whitelist
+  app.post("/api/gmail/add-discovered-suppliers", async (req, res) => {
+    try {
+      const { suppliers } = req.body;
+
+      if (!Array.isArray(suppliers) || suppliers.length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: "No suppliers provided",
+        });
+      }
+
+      const results = {
+        added: 0,
+        skipped: 0,
+        errors: [] as string[],
+      };
+
+      for (const supplier of suppliers) {
+        try {
+          // Check if already exists
+          const existing = await storage.getAllSupplierWhitelist();
+          const alreadyExists = existing.some(
+            (e) => e.domain?.toLowerCase() === supplier.domain?.toLowerCase()
+          );
+
+          if (alreadyExists) {
+            results.skipped++;
+            continue;
+          }
+
+          await storage.createSupplierWhitelist({
+            name: supplier.name,
+            emailPattern: supplier.emailPattern,
+            notes: `Auto-discovered from inbox (${supplier.emailCount} emails)`,
+            isActive: true,
+          });
+          results.added++;
+        } catch (error) {
+          results.errors.push(`${supplier.name}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+
+      log(`Added ${results.added} suppliers to whitelist (${results.skipped} skipped)`, "whitelist");
+
+      res.json({
+        success: true,
+        data: results,
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
       res.status(500).json({
         success: false,
         error: errorMessage,

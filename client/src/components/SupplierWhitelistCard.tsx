@@ -5,6 +5,7 @@ import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -33,6 +34,10 @@ import {
   Loader2,
   Mail,
   Building2,
+  Search,
+  Sparkles,
+  CheckCircle2,
+  Package,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
@@ -46,6 +51,17 @@ interface WhitelistEntry {
   createdAt: string;
 }
 
+interface DiscoveredSupplier {
+  name: string;
+  emailPattern: string;
+  domain: string;
+  emailCount: number;
+  sampleSubjects: string[];
+  sampleEmails: string[];
+  alreadyWhitelisted: boolean;
+  selected?: boolean;
+}
+
 export default function SupplierWhitelistCard() {
   const [entries, setEntries] = useState<WhitelistEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -53,10 +69,14 @@ export default function SupplierWhitelistCard() {
   const [editEntry, setEditEntry] = useState<WhitelistEntry | null>(null);
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [showImportDialog, setShowImportDialog] = useState(false);
+  const [showDiscoverDialog, setShowDiscoverDialog] = useState(false);
   const [formData, setFormData] = useState({ name: "", emailPattern: "", notes: "" });
   const [saving, setSaving] = useState(false);
   const [importData, setImportData] = useState<any[]>([]);
   const [importing, setImporting] = useState(false);
+  const [discovering, setDiscovering] = useState(false);
+  const [discoveredSuppliers, setDiscoveredSuppliers] = useState<DiscoveredSupplier[]>([]);
+  const [addingDiscovered, setAddingDiscovered] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { toast } = useToast();
 
@@ -227,7 +247,6 @@ export default function SupplierWhitelistCard() {
     };
     reader.readAsText(file);
 
-    // Reset file input
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
     }
@@ -266,6 +285,105 @@ export default function SupplierWhitelistCard() {
     }
   };
 
+  const handleDiscover = async () => {
+    setDiscovering(true);
+    setShowDiscoverDialog(true);
+    setDiscoveredSuppliers([]);
+
+    try {
+      const response = await fetch("/api/gmail/discover-suppliers", {
+        method: "POST",
+      });
+
+      const result = await response.json();
+
+      if (result.success) {
+        // Pre-select suppliers that aren't already whitelisted
+        const suppliers = result.data.suppliers.map((s: DiscoveredSupplier) => ({
+          ...s,
+          selected: !s.alreadyWhitelisted,
+        }));
+        setDiscoveredSuppliers(suppliers);
+
+        if (suppliers.length === 0) {
+          toast({
+            title: "No suppliers found",
+            description: "No potential supplier emails were found in your inbox.",
+          });
+        }
+      } else {
+        throw new Error(result.error);
+      }
+    } catch (error) {
+      toast({
+        title: "Discovery failed",
+        description: error instanceof Error ? error.message : "Could not scan inbox",
+        variant: "destructive",
+      });
+      setShowDiscoverDialog(false);
+    } finally {
+      setDiscovering(false);
+    }
+  };
+
+  const toggleSupplierSelection = (domain: string) => {
+    setDiscoveredSuppliers((prev) =>
+      prev.map((s) =>
+        s.domain === domain ? { ...s, selected: !s.selected } : s
+      )
+    );
+  };
+
+  const selectAllSuppliers = (selected: boolean) => {
+    setDiscoveredSuppliers((prev) =>
+      prev.map((s) => (s.alreadyWhitelisted ? s : { ...s, selected }))
+    );
+  };
+
+  const handleAddDiscovered = async () => {
+    const selectedSuppliers = discoveredSuppliers.filter((s) => s.selected && !s.alreadyWhitelisted);
+
+    if (selectedSuppliers.length === 0) {
+      toast({
+        title: "No suppliers selected",
+        description: "Please select at least one supplier to add.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setAddingDiscovered(true);
+    try {
+      const response = await fetch("/api/gmail/add-discovered-suppliers", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ suppliers: selectedSuppliers }),
+      });
+
+      const result = await response.json();
+
+      if (result.success) {
+        toast({
+          title: "Suppliers added",
+          description: `${result.data.added} suppliers added to whitelist.`,
+        });
+        fetchEntries();
+        setShowDiscoverDialog(false);
+        setDiscoveredSuppliers([]);
+      } else {
+        throw new Error(result.error);
+      }
+    } catch (error) {
+      toast({
+        title: "Failed to add suppliers",
+        description: error instanceof Error ? error.message : "Could not add suppliers",
+        variant: "destructive",
+      });
+    } finally {
+      setAddingDiscovered(false);
+    }
+  };
+
   const openEditDialog = (entry: WhitelistEntry) => {
     setEditEntry(entry);
     setFormData({
@@ -282,15 +400,18 @@ export default function SupplierWhitelistCard() {
     setShowAddDialog(true);
   };
 
+  const selectedCount = discoveredSuppliers.filter((s) => s.selected && !s.alreadyWhitelisted).length;
+  const selectableCount = discoveredSuppliers.filter((s) => !s.alreadyWhitelisted).length;
+
   return (
     <Card className="w-full">
       <CardHeader>
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between flex-wrap gap-2">
           <div className="flex items-center gap-2">
             <Shield className="h-5 w-5 text-primary" />
             <CardTitle className="text-lg">Supplier Whitelist</CardTitle>
           </div>
-          <div className="flex gap-2">
+          <div className="flex gap-2 flex-wrap">
             <input
               type="file"
               ref={fileInputRef}
@@ -298,6 +419,19 @@ export default function SupplierWhitelistCard() {
               onChange={handleFileUpload}
               className="hidden"
             />
+            <Button
+              variant="default"
+              size="sm"
+              onClick={handleDiscover}
+              disabled={discovering}
+            >
+              {discovering ? (
+                <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+              ) : (
+                <Sparkles className="h-4 w-4 mr-1" />
+              )}
+              Discover Suppliers
+            </Button>
             <Button
               variant="outline"
               size="sm"
@@ -312,16 +446,16 @@ export default function SupplierWhitelistCard() {
               onClick={() => fileInputRef.current?.click()}
             >
               <Upload className="h-4 w-4 mr-1" />
-              Import CSV
+              Import
             </Button>
-            <Button size="sm" onClick={openAddDialog}>
+            <Button variant="outline" size="sm" onClick={openAddDialog}>
               <Plus className="h-4 w-4 mr-1" />
-              Add Supplier
+              Add
             </Button>
           </div>
         </div>
         <CardDescription>
-          Only emails from whitelisted suppliers will be tracked. Leave empty to track all suppliers.
+          Only emails from whitelisted suppliers will be tracked. Use "Discover Suppliers" to scan your inbox.
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -334,10 +468,18 @@ export default function SupplierWhitelistCard() {
         {!loading && entries.length === 0 && (
           <div className="text-center py-8 text-muted-foreground">
             <Building2 className="h-12 w-12 mx-auto mb-4 opacity-50" />
-            <p>No suppliers in whitelist</p>
-            <p className="text-sm mt-1">
-              All supplier emails will be tracked. Add suppliers to filter.
+            <p className="font-medium">No suppliers in whitelist</p>
+            <p className="text-sm mt-1 mb-4">
+              Click "Discover Suppliers" to scan your inbox and find suppliers automatically.
             </p>
+            <Button onClick={handleDiscover} disabled={discovering}>
+              {discovering ? (
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+              ) : (
+                <Sparkles className="h-4 w-4 mr-2" />
+              )}
+              Discover Suppliers
+            </Button>
           </div>
         )}
 
@@ -392,6 +534,116 @@ export default function SupplierWhitelistCard() {
           </div>
         )}
       </CardContent>
+
+      {/* Discovery Dialog */}
+      <Dialog open={showDiscoverDialog} onOpenChange={setShowDiscoverDialog}>
+        <DialogContent className="max-w-3xl max-h-[80vh] overflow-hidden flex flex-col">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Search className="h-5 w-5" />
+              Discover Suppliers
+            </DialogTitle>
+            <DialogDescription>
+              {discovering
+                ? "Scanning your inbox for supplier emails..."
+                : discoveredSuppliers.length > 0
+                ? "Select the suppliers you want to track. We found these based on order-related emails."
+                : "No suppliers found in your inbox."}
+            </DialogDescription>
+          </DialogHeader>
+
+          {discovering && (
+            <div className="flex flex-col items-center justify-center py-12">
+              <Loader2 className="h-12 w-12 animate-spin text-primary mb-4" />
+              <p className="text-muted-foreground">Scanning emails from the last 60 days...</p>
+              <p className="text-sm text-muted-foreground mt-1">This may take a minute</p>
+            </div>
+          )}
+
+          {!discovering && discoveredSuppliers.length > 0 && (
+            <>
+              <div className="flex items-center justify-between py-2 border-b">
+                <div className="flex items-center gap-2">
+                  <Checkbox
+                    checked={selectedCount === selectableCount && selectableCount > 0}
+                    onCheckedChange={(checked) => selectAllSuppliers(!!checked)}
+                  />
+                  <span className="text-sm font-medium">
+                    Select All ({selectedCount} of {selectableCount} selected)
+                  </span>
+                </div>
+                <Badge variant="outline">{discoveredSuppliers.length} found</Badge>
+              </div>
+
+              <div className="flex-1 overflow-y-auto space-y-2 py-2">
+                {discoveredSuppliers.map((supplier) => (
+                  <div
+                    key={supplier.domain}
+                    className={`flex items-start gap-3 p-3 rounded-lg border ${
+                      supplier.alreadyWhitelisted
+                        ? "bg-muted/50 opacity-60"
+                        : supplier.selected
+                        ? "bg-primary/5 border-primary/20"
+                        : "bg-card"
+                    }`}
+                  >
+                    <Checkbox
+                      checked={supplier.selected || supplier.alreadyWhitelisted}
+                      disabled={supplier.alreadyWhitelisted}
+                      onCheckedChange={() => toggleSupplierSelection(supplier.domain)}
+                      className="mt-1"
+                    />
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-medium">{supplier.name}</span>
+                        <Badge variant="secondary" className="text-xs">
+                          <Package className="h-3 w-3 mr-1" />
+                          {supplier.emailCount} emails
+                        </Badge>
+                        {supplier.alreadyWhitelisted && (
+                          <Badge variant="default" className="text-xs">
+                            <CheckCircle2 className="h-3 w-3 mr-1" />
+                            Already added
+                          </Badge>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-1 text-sm text-muted-foreground mt-1">
+                        <Mail className="h-3 w-3" />
+                        <span>{supplier.emailPattern}</span>
+                      </div>
+                      {supplier.sampleSubjects.length > 0 && (
+                        <div className="mt-2">
+                          <p className="text-xs text-muted-foreground mb-1">Sample emails:</p>
+                          <ul className="text-xs text-muted-foreground space-y-0.5">
+                            {supplier.sampleSubjects.slice(0, 2).map((subject, i) => (
+                              <li key={i} className="truncate">• {subject}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+
+          <DialogFooter className="border-t pt-4">
+            <Button variant="outline" onClick={() => setShowDiscoverDialog(false)}>
+              Cancel
+            </Button>
+            {!discovering && discoveredSuppliers.length > 0 && (
+              <Button
+                onClick={handleAddDiscovered}
+                disabled={addingDiscovered || selectedCount === 0}
+              >
+                {addingDiscovered && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+                Add {selectedCount} Supplier{selectedCount !== 1 ? "s" : ""}
+              </Button>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Add/Edit Dialog */}
       <Dialog open={showAddDialog} onOpenChange={setShowAddDialog}>
