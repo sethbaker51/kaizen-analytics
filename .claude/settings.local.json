@@ -34,7 +34,9 @@
       "Bash(pgrep:*)",
       "Bash(find:*)",
       "Bash(npm run build:*)",
-      "Bash(echo:*)"
+      "Bash(echo:*)",
+      "Bash(npm run db:push:*)",
+      "Bash(git stash:*)"
     ]
   }
 }

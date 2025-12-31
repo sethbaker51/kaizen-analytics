@@ -23,6 +23,7 @@ import {
   Clock,
   Loader2,
 } from "lucide-react";
+import { useToast } from "@/hooks/use-toast";
 
 interface GmailAccount {
   id: string;
@@ -38,12 +39,22 @@ interface GmailStatus {
   configured: boolean;
 }
 
+interface SyncResult {
+  accountId: string;
+  email: string;
+  emailsProcessed: number;
+  ordersCreated: number;
+  ordersUpdated: number;
+  errors: string[];
+}
+
 export default function GmailAccountsCard() {
   const [accounts, setAccounts] = useState<GmailAccount[]>([]);
   const [status, setStatus] = useState<GmailStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState<string | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState<GmailAccount | null>(null);
+  const { toast } = useToast();
 
   const fetchAccounts = useCallback(async () => {
     try {
@@ -84,11 +95,24 @@ export default function GmailAccountsCard() {
       // Clear the URL params
       window.history.replaceState({}, "", window.location.pathname);
       fetchAccounts();
+      toast({
+        title: "Gmail account connected",
+        description: "Your Gmail account has been successfully connected for order tracking.",
+      });
     } else if (error) {
-      console.error("Gmail OAuth error:", error);
       window.history.replaceState({}, "", window.location.pathname);
+      const errorMessages: Record<string, string> = {
+        gmail_auth_denied: "Gmail authorization was denied",
+        gmail_no_code: "No authorization code received",
+        gmail_auth_failed: "Gmail authentication failed",
+      };
+      toast({
+        title: "Connection failed",
+        description: errorMessages[error] || "Failed to connect Gmail account",
+        variant: "destructive",
+      });
     }
-  }, [fetchAccounts, fetchStatus]);
+  }, [fetchAccounts, fetchStatus, toast]);
 
   const handleConnect = () => {
     window.location.href = "/api/gmail/auth";
@@ -103,14 +127,24 @@ export default function GmailAccountsCard() {
       });
 
       if (response.ok) {
+        const newEnabled = !account.syncEnabled;
         setAccounts((prev) =>
           prev.map((a) =>
-            a.id === account.id ? { ...a, syncEnabled: !a.syncEnabled } : a
+            a.id === account.id ? { ...a, syncEnabled: newEnabled } : a
           )
         );
+        toast({
+          title: newEnabled ? "Sync enabled" : "Sync disabled",
+          description: `Email sync for ${account.email} has been ${newEnabled ? "enabled" : "disabled"}.`,
+        });
       }
     } catch (error) {
       console.error("Failed to toggle sync:", error);
+      toast({
+        title: "Failed to update sync settings",
+        description: error instanceof Error ? error.message : "Please try again",
+        variant: "destructive",
+      });
     }
   };
 
@@ -122,9 +156,24 @@ export default function GmailAccountsCard() {
 
       if (response.ok) {
         setAccounts((prev) => prev.filter((a) => a.id !== account.id));
+        toast({
+          title: "Account disconnected",
+          description: `${account.email} has been disconnected from order tracking.`,
+        });
+      } else {
+        toast({
+          title: "Disconnect failed",
+          description: "Failed to disconnect the account. Please try again.",
+          variant: "destructive",
+        });
       }
     } catch (error) {
       console.error("Failed to disconnect account:", error);
+      toast({
+        title: "Disconnect failed",
+        description: error instanceof Error ? error.message : "Failed to disconnect account",
+        variant: "destructive",
+      });
     } finally {
       setDeleteConfirm(null);
     }
@@ -137,11 +186,43 @@ export default function GmailAccountsCard() {
         method: "POST",
       });
 
-      if (response.ok) {
+      const data = await response.json();
+
+      if (response.ok && data.success) {
         await fetchAccounts();
+
+        const result = data.data as SyncResult;
+        if (result.errors.length > 0) {
+          toast({
+            title: "Sync completed with errors",
+            description: `Processed ${result.emailsProcessed} emails, ${result.ordersCreated} new orders. ${result.errors.length} error(s) occurred.`,
+            variant: "destructive",
+          });
+        } else if (result.ordersCreated > 0 || result.ordersUpdated > 0) {
+          toast({
+            title: "Sync completed",
+            description: `Processed ${result.emailsProcessed} emails. Created ${result.ordersCreated} new orders, updated ${result.ordersUpdated}.`,
+          });
+        } else {
+          toast({
+            title: "Sync completed",
+            description: `Processed ${result.emailsProcessed} emails. No new orders found.`,
+          });
+        }
+      } else {
+        toast({
+          title: "Sync failed",
+          description: data.error || "Failed to sync emails",
+          variant: "destructive",
+        });
       }
     } catch (error) {
       console.error("Failed to sync:", error);
+      toast({
+        title: "Sync failed",
+        description: error instanceof Error ? error.message : "Failed to sync emails",
+        variant: "destructive",
+      });
     } finally {
       setSyncing(null);
     }

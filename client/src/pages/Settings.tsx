@@ -1,6 +1,7 @@
 import ConnectionTestCard from "@/components/ConnectionTestCard";
 import GmailAccountsCard from "@/components/GmailAccountsCard";
 import SupplierTrackingSettingsCard from "@/components/SupplierTrackingSettingsCard";
+import SyncLogsCard from "@/components/SyncLogsCard";
 
 export default function Settings() {
   return (
@@ -14,6 +15,7 @@ export default function Settings() {
 
       <ConnectionTestCard />
       <GmailAccountsCard />
+      <SyncLogsCard />
       <SupplierTrackingSettingsCard />
     </div>
   );

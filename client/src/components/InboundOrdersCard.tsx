@@ -9,6 +9,13 @@ import {
   ExternalLink,
   Eye,
   Filter,
+  ChevronLeft,
+  ChevronRight,
+  ChevronsLeft,
+  ChevronsRight,
+  ArrowUpDown,
+  ArrowUp,
+  ArrowDown,
 } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -68,18 +75,29 @@ interface OrderStats {
   dueThisWeek: number;
 }
 
+interface PaginationInfo {
+  total: number;
+  limit: number;
+  offset: number;
+}
+
 interface OrdersResponse {
   success: boolean;
   summary?: OrderStats;
   data?: SupplierOrder[];
+  pagination?: PaginationInfo;
   error?: string;
 }
 
 type DateRange = "7days" | "30days" | "60days" | "90days" | "all";
+type SortField = "supplier" | "orderNumber" | "orderDate" | "status" | "expectedDeliveryDate" | "totalCost";
+type SortDirection = "asc" | "desc";
 
 interface InboundOrdersCardProps {
   onViewOrder?: (order: SupplierOrder) => void;
 }
+
+const PAGE_SIZE = 25;
 
 export default function InboundOrdersCard({ onViewOrder }: InboundOrdersCardProps) {
   const [loading, setLoading] = useState(false);
@@ -88,6 +106,9 @@ export default function InboundOrdersCard({ onViewOrder }: InboundOrdersCardProp
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [flaggedOnly, setFlaggedOnly] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const [currentPage, setCurrentPage] = useState(1);
+  const [sortField, setSortField] = useState<SortField>("orderDate");
+  const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
 
   const getDateRangeParams = (range: DateRange) => {
     if (range === "all") return {};
@@ -129,6 +150,10 @@ export default function InboundOrdersCard({ onViewOrder }: InboundOrdersCardProp
       if (flaggedOnly) params.set("flagged", "true");
       if (searchQuery) params.set("search", searchQuery);
 
+      // Add pagination params
+      params.set("limit", PAGE_SIZE.toString());
+      params.set("offset", ((currentPage - 1) * PAGE_SIZE).toString());
+
       const response = await fetch(`/api/supplier-orders?${params.toString()}`);
       const data = await response.json();
       setResult(data);
@@ -140,6 +165,11 @@ export default function InboundOrdersCard({ onViewOrder }: InboundOrdersCardProp
     } finally {
       setLoading(false);
     }
+  }, [dateRange, statusFilter, flaggedOnly, searchQuery, currentPage]);
+
+  // Reset to page 1 when filters change
+  useEffect(() => {
+    setCurrentPage(1);
   }, [dateRange, statusFilter, flaggedOnly, searchQuery]);
 
   useEffect(() => {
@@ -162,7 +192,68 @@ export default function InboundOrdersCard({ onViewOrder }: InboundOrdersCardProp
     }
   };
 
-  const orders = result?.data || [];
+  // Sort orders client-side
+  const sortOrders = (orders: SupplierOrder[]) => {
+    return [...orders].sort((a, b) => {
+      let aVal: string | number | null;
+      let bVal: string | number | null;
+
+      switch (sortField) {
+        case "supplier":
+          aVal = a.supplierName?.toLowerCase() ?? "";
+          bVal = b.supplierName?.toLowerCase() ?? "";
+          break;
+        case "orderNumber":
+          aVal = a.orderNumber?.toLowerCase() ?? "";
+          bVal = b.orderNumber?.toLowerCase() ?? "";
+          break;
+        case "orderDate":
+          aVal = a.orderDate ? new Date(a.orderDate).getTime() : 0;
+          bVal = b.orderDate ? new Date(b.orderDate).getTime() : 0;
+          break;
+        case "status":
+          const statusOrder = ["pending", "confirmed", "shipped", "in_transit", "delivered", "cancelled", "issue"];
+          aVal = statusOrder.indexOf(a.status);
+          bVal = statusOrder.indexOf(b.status);
+          break;
+        case "expectedDeliveryDate":
+          aVal = a.expectedDeliveryDate ? new Date(a.expectedDeliveryDate).getTime() : 0;
+          bVal = b.expectedDeliveryDate ? new Date(b.expectedDeliveryDate).getTime() : 0;
+          break;
+        case "totalCost":
+          aVal = a.totalCost ? parseFloat(a.totalCost) : 0;
+          bVal = b.totalCost ? parseFloat(b.totalCost) : 0;
+          break;
+        default:
+          return 0;
+      }
+
+      if (aVal < bVal) return sortDirection === "asc" ? -1 : 1;
+      if (aVal > bVal) return sortDirection === "asc" ? 1 : -1;
+      return 0;
+    });
+  };
+
+  const handleSort = (field: SortField) => {
+    if (field === sortField) {
+      setSortDirection(prev => prev === "asc" ? "desc" : "asc");
+    } else {
+      setSortField(field);
+      setSortDirection("desc");
+    }
+  };
+
+  const SortIcon = ({ field }: { field: SortField }) => {
+    if (field !== sortField) {
+      return <ArrowUpDown className="h-4 w-4 ml-1 opacity-50" />;
+    }
+    return sortDirection === "asc"
+      ? <ArrowUp className="h-4 w-4 ml-1" />
+      : <ArrowDown className="h-4 w-4 ml-1" />;
+  };
+
+  const rawOrders = result?.data || [];
+  const orders = sortOrders(rawOrders);
   const summary = result?.summary;
 
   const getStatusBadge = (status: string) => {
@@ -356,13 +447,61 @@ export default function InboundOrdersCard({ onViewOrder }: InboundOrdersCardProp
               <TableHeader>
                 <TableRow>
                   <TableHead className="w-8"></TableHead>
-                  <TableHead>Supplier</TableHead>
-                  <TableHead>Order #</TableHead>
-                  <TableHead>Date</TableHead>
-                  <TableHead>Status</TableHead>
+                  <TableHead>
+                    <button
+                      onClick={() => handleSort("supplier")}
+                      className="flex items-center hover:text-foreground transition-colors"
+                    >
+                      Supplier
+                      <SortIcon field="supplier" />
+                    </button>
+                  </TableHead>
+                  <TableHead>
+                    <button
+                      onClick={() => handleSort("orderNumber")}
+                      className="flex items-center hover:text-foreground transition-colors"
+                    >
+                      Order #
+                      <SortIcon field="orderNumber" />
+                    </button>
+                  </TableHead>
+                  <TableHead>
+                    <button
+                      onClick={() => handleSort("orderDate")}
+                      className="flex items-center hover:text-foreground transition-colors"
+                    >
+                      Date
+                      <SortIcon field="orderDate" />
+                    </button>
+                  </TableHead>
+                  <TableHead>
+                    <button
+                      onClick={() => handleSort("status")}
+                      className="flex items-center hover:text-foreground transition-colors"
+                    >
+                      Status
+                      <SortIcon field="status" />
+                    </button>
+                  </TableHead>
                   <TableHead>Tracking</TableHead>
-                  <TableHead>Expected</TableHead>
-                  <TableHead className="text-right">Cost</TableHead>
+                  <TableHead>
+                    <button
+                      onClick={() => handleSort("expectedDeliveryDate")}
+                      className="flex items-center hover:text-foreground transition-colors"
+                    >
+                      Expected
+                      <SortIcon field="expectedDeliveryDate" />
+                    </button>
+                  </TableHead>
+                  <TableHead className="text-right">
+                    <button
+                      onClick={() => handleSort("totalCost")}
+                      className="flex items-center justify-end hover:text-foreground transition-colors w-full"
+                    >
+                      Cost
+                      <SortIcon field="totalCost" />
+                    </button>
+                  </TableHead>
                   <TableHead className="w-20">Actions</TableHead>
                 </TableRow>
               </TableHeader>
@@ -450,8 +589,54 @@ export default function InboundOrdersCard({ onViewOrder }: InboundOrdersCardProp
           </div>
         )}
 
-        {/* Footer */}
-        {orders.length > 0 && (
+        {/* Pagination */}
+        {result?.pagination && result.pagination.total > PAGE_SIZE && (
+          <div className="flex items-center justify-between pt-4 border-t">
+            <p className="text-sm text-muted-foreground">
+              Showing {((currentPage - 1) * PAGE_SIZE) + 1} - {Math.min(currentPage * PAGE_SIZE, result.pagination.total)} of {result.pagination.total} orders
+            </p>
+            <div className="flex items-center gap-1">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setCurrentPage(1)}
+                disabled={currentPage === 1 || loading}
+              >
+                <ChevronsLeft className="h-4 w-4" />
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                disabled={currentPage === 1 || loading}
+              >
+                <ChevronLeft className="h-4 w-4" />
+              </Button>
+              <span className="px-3 text-sm">
+                Page {currentPage} of {Math.ceil(result.pagination.total / PAGE_SIZE)}
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setCurrentPage(p => p + 1)}
+                disabled={currentPage >= Math.ceil(result.pagination.total / PAGE_SIZE) || loading}
+              >
+                <ChevronRight className="h-4 w-4" />
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setCurrentPage(Math.ceil(result.pagination.total / PAGE_SIZE))}
+                disabled={currentPage >= Math.ceil(result.pagination.total / PAGE_SIZE) || loading}
+              >
+                <ChevronsRight className="h-4 w-4" />
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {/* Footer for small result sets */}
+        {orders.length > 0 && (!result?.pagination || result.pagination.total <= PAGE_SIZE) && (
           <p className="text-sm text-muted-foreground text-center pt-2">
             Showing {orders.length} order{orders.length !== 1 ? "s" : ""}
           </p>

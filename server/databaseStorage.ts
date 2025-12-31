@@ -193,7 +193,7 @@ export class DatabaseStorage implements IStorage {
     return undefined;
   }
 
-  async getSupplierOrders(filters: SupplierOrderFilters): Promise<SupplierOrder[]> {
+  async getSupplierOrders(filters: SupplierOrderFilters): Promise<{ orders: SupplierOrder[]; total: number }> {
     const conditions = [];
 
     if (filters.status) {
@@ -223,20 +223,30 @@ export class DatabaseStorage implements IStorage {
       ));
     }
 
+    // Build where clause
+    const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+
+    // Get total count first
+    const countQuery = db.select({ count: sql<number>`count(*)` }).from(supplierOrders);
+    const [countResult] = whereClause
+      ? await countQuery.where(whereClause)
+      : await countQuery;
+    const total = Number(countResult?.count ?? 0);
+
+    // Get paginated results
     const query = db.select().from(supplierOrders);
+    const orders = whereClause
+      ? await query
+          .where(whereClause)
+          .orderBy(desc(supplierOrders.orderDate), desc(supplierOrders.createdAt))
+          .limit(filters.limit ?? 100)
+          .offset(filters.offset ?? 0)
+      : await query
+          .orderBy(desc(supplierOrders.orderDate), desc(supplierOrders.createdAt))
+          .limit(filters.limit ?? 100)
+          .offset(filters.offset ?? 0);
 
-    if (conditions.length > 0) {
-      return query
-        .where(and(...conditions))
-        .orderBy(desc(supplierOrders.orderDate), desc(supplierOrders.createdAt))
-        .limit(filters.limit ?? 100)
-        .offset(filters.offset ?? 0);
-    }
-
-    return query
-      .orderBy(desc(supplierOrders.orderDate), desc(supplierOrders.createdAt))
-      .limit(filters.limit ?? 100)
-      .offset(filters.offset ?? 0);
+    return { orders, total };
   }
 
   async updateSupplierOrder(id: string, data: Partial<SupplierOrder>): Promise<SupplierOrder | undefined> {

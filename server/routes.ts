@@ -1680,7 +1680,7 @@ MY-SKU-002,B07XJ8C8F5,29.99,50,new,true,true,Not Applicable`;
         offset: offset ? parseInt(offset as string) : 0,
       };
 
-      const [orders, stats] = await Promise.all([
+      const [ordersResult, stats] = await Promise.all([
         storage.getSupplierOrders(filters),
         storage.getSupplierOrderStats(),
       ]);
@@ -1688,7 +1688,12 @@ MY-SKU-002,B07XJ8C8F5,29.99,50,new,true,true,Not Applicable`;
       res.json({
         success: true,
         summary: stats,
-        data: orders,
+        data: ordersResult.orders,
+        pagination: {
+          total: ordersResult.total,
+          limit: filters.limit ?? 100,
+          offset: filters.offset ?? 0,
+        },
       });
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);

@@ -81,7 +81,7 @@ export interface IStorage {
   getSupplierOrderByEmailId(emailMessageId: string): Promise<SupplierOrder | undefined>;
   getSupplierOrderByOrderNumber(orderNumber: string): Promise<SupplierOrder | undefined>;
   findMatchingOrder(supplierEmail: string | null, orderNumber: string | null, trackingNumber: string | null): Promise<SupplierOrder | undefined>;
-  getSupplierOrders(filters: SupplierOrderFilters): Promise<SupplierOrder[]>;
+  getSupplierOrders(filters: SupplierOrderFilters): Promise<{ orders: SupplierOrder[]; total: number }>;
   updateSupplierOrder(id: string, data: Partial<SupplierOrder>): Promise<SupplierOrder | undefined>;
   getSupplierOrderStats(): Promise<SupplierOrderStats>;
 
@@ -392,7 +392,7 @@ export class MemStorage implements IStorage {
     return undefined;
   }
 
-  async getSupplierOrders(filters: SupplierOrderFilters): Promise<SupplierOrder[]> {
+  async getSupplierOrders(filters: SupplierOrderFilters): Promise<{ orders: SupplierOrder[]; total: number }> {
     let orders = Array.from(this.supplierOrders.values());
 
     // Apply filters
@@ -433,10 +433,15 @@ export class MemStorage implements IStorage {
       return dateB - dateA;
     });
 
+    // Get total before pagination
+    const total = orders.length;
+
     // Apply pagination
     const offset = filters.offset ?? 0;
     const limit = filters.limit ?? 100;
-    return orders.slice(offset, offset + limit);
+    const paginatedOrders = orders.slice(offset, offset + limit);
+
+    return { orders: paginatedOrders, total };
   }
 
   async updateSupplierOrder(id: string, data: Partial<SupplierOrder>): Promise<SupplierOrder | undefined> {

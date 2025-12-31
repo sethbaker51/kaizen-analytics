@@ -35,25 +35,45 @@ const ORDER_NUMBER_PATTERNS = [
   /po\s*(?:#|number)?[:\s]*([A-Z0-9][-A-Z0-9]{3,30})/i,
 ];
 
-// Tracking number patterns
+// Tracking number patterns - more specific to avoid false positives
 const TRACKING_PATTERNS = [
-  /tracking\s*(?:#|number|no\.?|id)?[:\s]*([A-Z0-9]{8,30})/i,
-  /track(?:ing)?\s+(?:your\s+)?(?:package|shipment|order)[:\s]*([A-Z0-9]{8,30})/i,
-  /(?:ups|fedex|usps|dhl)\s*(?:#|tracking)?[:\s]*([A-Z0-9]{8,30})/i,
-  /shipment\s*(?:#|id)?[:\s]*([A-Z0-9]{8,30})/i,
-  /(?:1Z[A-Z0-9]{16})/i, // UPS
-  /(?:\d{12,22})/i, // FedEx/USPS
+  // UPS: 1Z followed by 16 alphanumeric chars
+  { pattern: /(1Z[A-Z0-9]{16})/i, carrier: "UPS" },
+  // FedEx: 12, 15, 20, or 22 digits
+  { pattern: /\b(\d{12})\b(?!\d)/, carrier: "FedEx" },
+  { pattern: /\b(\d{15})\b(?!\d)/, carrier: "FedEx" },
+  { pattern: /\b(\d{20})\b(?!\d)/, carrier: "FedEx" },
+  { pattern: /\b(\d{22})\b(?!\d)/, carrier: "FedEx" },
+  // USPS: 20-22 digits or specific formats
+  { pattern: /\b(9[2-5]\d{20,22})\b/, carrier: "USPS" },
+  { pattern: /\b(420\d{5}9[2-5]\d{20,22})\b/, carrier: "USPS" },
+  // DHL: 10 or 11 digits
+  { pattern: /\b(\d{10,11})\b(?=.*dhl)/i, carrier: "DHL" },
+  // Amazon Logistics: TBA followed by digits
+  { pattern: /(TBA\d{12,})/i, carrier: "Amazon" },
+  // Generic tracking with keyword context
+  { pattern: /tracking\s*(?:#|number|no\.?|id)?[:\s]*([A-Z0-9]{10,30})/i, carrier: null },
+  { pattern: /track(?:ing)?\s+(?:your\s+)?(?:package|shipment|order)[:\s]*([A-Z0-9]{10,30})/i, carrier: null },
 ];
 
-// Carrier detection patterns
+// Carrier detection patterns - expanded for more carriers
 const CARRIER_PATTERNS: Record<string, RegExp> = {
   UPS: /\bups\b|united\s+parcel|1Z[A-Z0-9]{16}/i,
   FedEx: /\bfedex\b|federal\s+express/i,
-  USPS: /\busps\b|postal\s+service|united\s+states\s+postal/i,
-  DHL: /\bdhl\b/i,
-  Amazon: /\bamazon\s+logistics\b|amzl/i,
+  USPS: /\busps\b|postal\s+service|united\s+states\s+postal|first[\s-]?class|priority\s+mail/i,
+  DHL: /\bdhl\b|deutsche\s+post/i,
+  Amazon: /\bamazon\s+logistics\b|amzl|TBA\d{12,}/i,
   OnTrac: /\bontrac\b/i,
   LaserShip: /\blasership\b/i,
+  Spee_Dee: /\bspee[\s-]?dee\b/i,
+  GLS: /\bgls\b|general\s+logistics/i,
+  Purolator: /\bpurolator\b/i,
+  Canada_Post: /\bcanada\s+post\b/i,
+  LSO: /\blso\b|lone\s+star\s+overnight/i,
+  Saia: /\bsaia\b/i,
+  Estes: /\bestes\b/i,
+  XPO: /\bxpo\b/i,
+  "R+L": /\br\+l\s+carriers\b|r\s*\+\s*l/i,
 };
 
 // Date patterns
@@ -206,20 +226,28 @@ export function extractOrderNumber(
 
 /**
  * Extract tracking number from email content
+ * Returns both tracking number and detected carrier
  */
-export function extractTrackingNumber(body: string): string | null {
-  for (const pattern of TRACKING_PATTERNS) {
+export function extractTrackingNumber(body: string): { tracking: string | null; carrier: string | null } {
+  for (const { pattern, carrier } of TRACKING_PATTERNS) {
     const match = body.match(pattern);
     if (match && match[1]) {
       const tracking = match[1].toUpperCase();
-      // Basic validation - tracking numbers are usually 8-30 chars
-      if (tracking.length >= 8 && tracking.length <= 30) {
-        return tracking;
+      // Basic validation - tracking numbers are usually 10-30 chars
+      if (tracking.length >= 10 && tracking.length <= 30) {
+        return { tracking, carrier };
       }
     }
   }
 
-  return null;
+  return { tracking: null, carrier: null };
+}
+
+/**
+ * Legacy function for backward compatibility
+ */
+export function extractTrackingNumberOnly(body: string): string | null {
+  return extractTrackingNumber(body).tracking;
 }
 
 /**
@@ -235,51 +263,91 @@ export function detectCarrier(body: string): string | null {
 }
 
 /**
+ * Parse a date string with intelligent year handling
+ */
+function parseDate(dateStr: string, referenceDate: Date = new Date()): Date | null {
+  // Clean up the date string
+  const cleaned = dateStr.trim().replace(/,/g, "");
+
+  // Try direct parsing first
+  let parsed = new Date(cleaned);
+
+  // If no year in string, add current or next year
+  const hasYear = /\d{4}/.test(cleaned) || /'\d{2}/.test(cleaned);
+  if (!hasYear && !isNaN(parsed.getTime())) {
+    const currentYear = referenceDate.getFullYear();
+    // If the date has already passed this year, assume next year
+    if (parsed.getMonth() < referenceDate.getMonth() ||
+        (parsed.getMonth() === referenceDate.getMonth() && parsed.getDate() < referenceDate.getDate())) {
+      // Only for future-looking dates (delivery), keep as this year for past dates (order)
+      parsed.setFullYear(currentYear);
+    } else {
+      parsed.setFullYear(currentYear);
+    }
+  }
+
+  // Handle 2-digit years
+  if (!isNaN(parsed.getTime()) && parsed.getFullYear() < 100) {
+    const century = parsed.getFullYear() < 50 ? 2000 : 1900;
+    parsed.setFullYear(parsed.getFullYear() + century);
+  }
+
+  // Validate the date is reasonable (not too far in past or future)
+  if (!isNaN(parsed.getTime())) {
+    const fiveYearsAgo = new Date();
+    fiveYearsAgo.setFullYear(fiveYearsAgo.getFullYear() - 5);
+    const twoYearsFromNow = new Date();
+    twoYearsFromNow.setFullYear(twoYearsFromNow.getFullYear() + 2);
+
+    if (parsed >= fiveYearsAgo && parsed <= twoYearsFromNow) {
+      return parsed;
+    }
+  }
+
+  return null;
+}
+
+/**
  * Extract dates from email content
  */
 export function extractDates(body: string): {
   orderDate: Date | null;
   expectedDeliveryDate: Date | null;
 } {
+  const now = new Date();
   const dates: Date[] = [];
 
   for (const pattern of DATE_PATTERNS) {
     const regex = new RegExp(pattern, "gi");
     let match;
     while ((match = regex.exec(body)) !== null) {
-      try {
-        const parsed = new Date(match[1]);
-        if (!isNaN(parsed.getTime())) {
-          dates.push(parsed);
-        }
-      } catch {
-        // Ignore unparseable dates
+      const parsed = parseDate(match[1], now);
+      if (parsed) {
+        dates.push(parsed);
       }
     }
   }
 
-  // Sort dates
+  // Sort dates chronologically
   dates.sort((a, b) => a.getTime() - b.getTime());
 
-  // Look for delivery date keywords
+  // Look for delivery date keywords with more patterns
   let expectedDeliveryDate: Date | null = null;
   const deliveryPatterns = [
-    /(?:expected|estimated|delivery|arrive|arriving)[^.]*?(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/i,
-    /(?:expected|estimated|delivery|arrive|arriving)[^.]*?((?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2})/i,
-    /by\s+((?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2})/i,
+    /(?:expected|estimated|delivery|arrive|arriving|arrives?|delivering|due)[^.]{0,30}?(\d{1,2}[\/\-]\d{1,2}(?:[\/\-]\d{2,4})?)/i,
+    /(?:expected|estimated|delivery|arrive|arriving|arrives?|delivering|due)[^.]{0,30}?((?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2}(?:,?\s+\d{4})?)/i,
+    /by\s+((?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2}(?:,?\s+\d{4})?)/i,
+    /(?:between|from)\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2}[^.]*?(?:and|to|-)\s+((?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2})/i,
+    /(\d{1,2}[\/\-]\d{1,2}(?:[\/\-]\d{2,4})?)\s*(?:to|-)\s*\d{1,2}[\/\-]\d{1,2}/i, // Take the end of a range
   ];
 
   for (const pattern of deliveryPatterns) {
     const match = body.match(pattern);
     if (match) {
-      try {
-        const parsed = new Date(match[1]);
-        if (!isNaN(parsed.getTime())) {
-          expectedDeliveryDate = parsed;
-          break;
-        }
-      } catch {
-        // Ignore
+      const parsed = parseDate(match[1], now);
+      if (parsed && parsed > now) {
+        expectedDeliveryDate = parsed;
+        break;
       }
     }
   }
@@ -325,8 +393,13 @@ export function parseSupplierEmail(email: EmailDetails): ParsedOrderData {
   const supplierName = extractSupplierName(from);
   const supplierEmail = extractSupplierEmail(from);
   const orderNumber = extractOrderNumber(subject, body);
-  const trackingNumber = extractTrackingNumber(body);
-  const carrier = detectCarrier(body);
+
+  // Extract tracking with carrier detection
+  const { tracking: trackingNumber, carrier: trackingCarrier } = extractTrackingNumber(body);
+
+  // Use carrier from tracking pattern if available, otherwise detect from body
+  const carrier = trackingCarrier || detectCarrier(body);
+
   const { orderDate, expectedDeliveryDate } = extractDates(body);
   const { amount: totalCost, currency } = extractTotalCost(body);
 
